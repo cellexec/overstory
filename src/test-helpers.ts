@@ -61,7 +61,7 @@ export async function cleanupTempDir(dir: string): Promise<void> {
 /**
  * Run a git command in the given directory. Throws on non-zero exit.
  */
-async function runGitInDir(cwd: string, args: string[]): Promise<string> {
+export async function runGitInDir(cwd: string, args: string[]): Promise<string> {
 	const proc = Bun.spawn(["git", ...args], {
 		cwd,
 		stdout: "pipe",

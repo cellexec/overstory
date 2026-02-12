@@ -84,6 +84,41 @@ function parseJsonOutput<T>(stdout: string, context: string): T {
 }
 
 /**
+ * Raw issue shape from the bd CLI.
+ * bd uses `issue_type` instead of `type`.
+ */
+interface RawBeadIssue {
+	id: string;
+	title: string;
+	status: string;
+	priority: number;
+	issue_type?: string;
+	type?: string;
+	assignee?: string;
+	description?: string;
+	blocks?: string[];
+	blockedBy?: string[];
+}
+
+/**
+ * Normalize a raw bd issue into a BeadIssue.
+ * Maps `issue_type` -> `type` to match the BeadIssue interface.
+ */
+function normalizeIssue(raw: RawBeadIssue): BeadIssue {
+	return {
+		id: raw.id,
+		title: raw.title,
+		status: raw.status,
+		priority: raw.priority,
+		type: raw.issue_type ?? raw.type ?? "unknown",
+		assignee: raw.assignee,
+		description: raw.description,
+		blocks: raw.blocks,
+		blockedBy: raw.blockedBy,
+	};
+}
+
+/**
  * Create a BeadsClient bound to the given working directory.
  *
  * @param cwd - Working directory where bd commands should run
@@ -108,12 +143,19 @@ export function createBeadsClient(cwd: string): BeadsClient {
 				args.push("--mol", options.mol);
 			}
 			const { stdout } = await runBd(args, "ready");
-			return parseJsonOutput<BeadIssue[]>(stdout, "ready");
+			const raw = parseJsonOutput<RawBeadIssue[]>(stdout, "ready");
+			return raw.map(normalizeIssue);
 		},
 
 		async show(id) {
 			const { stdout } = await runBd(["show", id, "--json"], `show ${id}`);
-			return parseJsonOutput<BeadIssue>(stdout, `show ${id}`);
+			// bd show --json returns an array with a single element
+			const raw = parseJsonOutput<RawBeadIssue[]>(stdout, `show ${id}`);
+			const first = raw[0];
+			if (!first) {
+				throw new AgentError(`bd show ${id} returned empty array`);
+			}
+			return normalizeIssue(first);
 		},
 
 		async create(title, options) {
@@ -153,7 +195,8 @@ export function createBeadsClient(cwd: string): BeadsClient {
 				args.push("--limit", String(options.limit));
 			}
 			const { stdout } = await runBd(args, "list");
-			return parseJsonOutput<BeadIssue[]>(stdout, "list");
+			const raw = parseJsonOutput<RawBeadIssue[]>(stdout, "list");
+			return raw.map(normalizeIssue);
 		},
 	};
 }

@@ -1,337 +1,232 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { Subprocess } from "bun";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { AgentError } from "../errors.ts";
-import { type BeadIssue, type BeadsClient, createBeadsClient } from "./client.ts";
+import { cleanupTempDir, createTempGitRepo } from "../test-helpers.ts";
+import { type BeadsClient, createBeadsClient } from "./client.ts";
 
 /**
- * Helper to extract the command array from a Bun.spawn spy call.
- * Handles noUncheckedIndexedAccess by using optional chaining.
+ * Check if the bd CLI is available on this machine (synchronous).
+ * Uses Bun.spawnSync so the result is available at test registration time
+ * for use with test.skipIf().
  */
-function getSpawnCmd(spy: ReturnType<typeof spyOn>, callIndex = 0): string[] {
-	const call = spy.mock.calls[callIndex];
-	if (!call) {
-		throw new Error(`No call at index ${callIndex}`);
+function isBdAvailable(): boolean {
+	try {
+		const result = Bun.spawnSync(["bd", "--version"], {
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		return result.exitCode === 0;
+	} catch {
+		return false;
 	}
-	return call[0] as string[];
 }
 
 /**
- * Helper to extract spawn options from a Bun.spawn spy call.
+ * Initialize beads in a git repo directory.
  */
-function getSpawnOptions(spy: ReturnType<typeof spyOn>, callIndex = 0): { cwd: string } {
-	const call = spy.mock.calls[callIndex];
-	if (!call) {
-		throw new Error(`No call at index ${callIndex}`);
+async function initBeads(cwd: string): Promise<void> {
+	const proc = Bun.spawn(["bd", "init"], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const exitCode = await proc.exited;
+	if (exitCode !== 0) {
+		const stderr = await new Response(proc.stderr).text();
+		throw new Error(`bd init failed: ${stderr}`);
 	}
-	return call[1] as { cwd: string };
 }
 
-/**
- * Helper to create a mock Bun.spawn return value.
- * Returns an object shaped like a Subprocess with piped stdout/stderr.
- */
-function mockSpawnResult(stdout: string, stderr: string, exitCode: number): Partial<Subprocess> {
-	const stdoutBody = new Response(stdout).body;
-	const stderrBody = new Response(stderr).body;
-	return {
-		stdout: stdoutBody ?? undefined,
-		stderr: stderrBody ?? undefined,
-		exited: Promise.resolve(exitCode),
-		pid: 12345,
-	};
-}
+const bdAvailable = isBdAvailable();
 
-const sampleIssue: BeadIssue = {
-	id: "test-1",
-	title: "Test Issue",
-	status: "open",
-	priority: 2,
-	type: "task",
-};
-
-const sampleIssueList: BeadIssue[] = [
-	sampleIssue,
-	{
-		id: "test-2",
-		title: "Another Issue",
-		status: "open",
-		priority: 1,
-		type: "bug",
-	},
-];
-
-describe("createBeadsClient", () => {
+describe("createBeadsClient (integration)", () => {
+	let tempDir: string;
 	let client: BeadsClient;
-	let spawnSpy: ReturnType<typeof spyOn>;
 
-	beforeEach(() => {
-		client = createBeadsClient("/fake/project");
-		spawnSpy = spyOn(Bun, "spawn");
+	beforeEach(async () => {
+		if (!bdAvailable) return;
+		// realpathSync resolves macOS /var -> /private/var symlink so paths match
+		tempDir = realpathSync(await createTempGitRepo());
+		await initBeads(tempDir);
+		client = createBeadsClient(tempDir);
 	});
 
-	afterEach(() => {
-		spawnSpy.mockRestore();
+	afterEach(async () => {
+		if (!bdAvailable) return;
+		await cleanupTempDir(tempDir);
 	});
 
-	describe("ready", () => {
-		test("returns parsed issues from bd ready --json", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify(sampleIssueList), "", 0) as Subprocess,
-			);
+	describe("create", () => {
+		test.skipIf(!bdAvailable)("returns an issue ID", async () => {
+			const id = await client.create("Integration test issue");
 
-			const issues = await client.ready();
-
-			expect(issues).toHaveLength(2);
-			expect(issues[0]?.id).toBe("test-1");
-			expect(issues[1]?.id).toBe("test-2");
-
-			// Verify correct command was called
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "ready", "--json"]);
+			expect(typeof id).toBe("string");
+			expect(id.length).toBeGreaterThan(0);
 		});
 
-		test("passes --mol flag when option provided", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify(sampleIssueList), "", 0) as Subprocess,
-			);
+		test.skipIf(!bdAvailable)("returns ID with type and priority options", async () => {
+			const id = await client.create("Typed issue", {
+				type: "bug",
+				priority: 1,
+			});
 
-			await client.ready({ mol: "core" });
+			expect(typeof id).toBe("string");
+			expect(id.length).toBeGreaterThan(0);
+		});
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "ready", "--json", "--mol", "core"]);
+		test.skipIf(!bdAvailable)("returns ID with description option", async () => {
+			const id = await client.create("Described issue", {
+				description: "A detailed description",
+			});
+
+			expect(typeof id).toBe("string");
+			expect(id.length).toBeGreaterThan(0);
 		});
 	});
 
 	describe("show", () => {
-		test("returns a single parsed issue", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify(sampleIssue), "", 0) as Subprocess,
-			);
-
-			const issue = await client.show("test-1");
-
-			expect(issue.id).toBe("test-1");
-			expect(issue.title).toBe("Test Issue");
-			expect(issue.status).toBe("open");
-
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "show", "test-1", "--json"]);
-		});
-	});
-
-	describe("create", () => {
-		test("returns new issue id from bd create", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify({ id: "new-issue-1" }), "", 0) as Subprocess,
-			);
-
-			const id = await client.create("New Feature");
-
-			expect(id).toBe("new-issue-1");
-
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "create", "New Feature", "--json"]);
-		});
-
-		test("passes all option flags correctly", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify({ id: "new-issue-2" }), "", 0) as Subprocess,
-			);
-
-			await client.create("Bug Fix", {
-				type: "bug",
-				priority: 1,
-				description: "Critical fix needed",
+		test.skipIf(!bdAvailable)("returns issue details for a valid ID", async () => {
+			const id = await client.create("Show test issue", {
+				type: "task",
+				priority: 2,
 			});
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual([
-				"bd",
-				"create",
-				"Bug Fix",
-				"--json",
-				"--type",
-				"bug",
-				"--priority",
-				"1",
-				"--description",
-				"Critical fix needed",
-			]);
-		});
+			const issue = await client.show(id);
 
-		test("only passes provided options, omits undefined ones", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify({ id: "new-issue-3" }), "", 0) as Subprocess,
-			);
-
-			await client.create("Task", { type: "task" });
-
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "create", "Task", "--json", "--type", "task"]);
+			expect(issue.id).toBe(id);
+			expect(issue.title).toBe("Show test issue");
+			expect(issue.status).toBe("open");
+			expect(issue.priority).toBe(2);
+			expect(issue.type).toBe("task");
 		});
 	});
 
 	describe("claim", () => {
-		test("runs bd update with in_progress status", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0) as Subprocess);
+		test.skipIf(!bdAvailable)("changes issue status to in_progress", async () => {
+			const id = await client.create("Claim test issue");
 
-			await client.claim("test-1");
+			await client.claim(id);
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "update", "test-1", "--status", "in_progress"]);
+			const issue = await client.show(id);
+			expect(issue.status).toBe("in_progress");
 		});
 
-		test("returns void on success", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0) as Subprocess);
+		test.skipIf(!bdAvailable)("returns void on success", async () => {
+			const id = await client.create("Claim void test");
 
-			const result = await client.claim("test-1");
+			const result = await client.claim(id);
 			expect(result).toBeUndefined();
 		});
 	});
 
 	describe("close", () => {
-		test("runs bd close without reason", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0) as Subprocess);
+		test.skipIf(!bdAvailable)("closes an issue without reason", async () => {
+			const id = await client.create("Close test issue");
 
-			await client.close("test-1");
+			await client.close(id);
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "close", "test-1"]);
+			const issue = await client.show(id);
+			expect(issue.status).toBe("closed");
 		});
 
-		test("runs bd close with --reason flag when provided", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0) as Subprocess);
+		test.skipIf(!bdAvailable)("closes an issue with a reason", async () => {
+			const id = await client.create("Close reason test");
 
-			await client.close("test-1", "Completed all acceptance criteria");
+			await client.close(id, "Completed all acceptance criteria");
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual([
-				"bd",
-				"close",
-				"test-1",
-				"--reason",
-				"Completed all acceptance criteria",
-			]);
+			const issue = await client.show(id);
+			expect(issue.status).toBe("closed");
 		});
 	});
 
 	describe("list", () => {
-		test("returns parsed issues from bd list --json", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify(sampleIssueList), "", 0) as Subprocess,
-			);
+		test.skipIf(!bdAvailable)("returns all issues", async () => {
+			await client.create("List issue 1");
+			await client.create("List issue 2");
 
 			const issues = await client.list();
 
-			expect(issues).toHaveLength(2);
-			expect(issues[0]?.id).toBe("test-1");
-
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "list", "--json"]);
+			expect(issues.length).toBeGreaterThanOrEqual(2);
+			const titles = issues.map((i) => i.title);
+			expect(titles).toContain("List issue 1");
+			expect(titles).toContain("List issue 2");
 		});
 
-		test("passes --status filter", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify([sampleIssue]), "", 0) as Subprocess,
-			);
+		test.skipIf(!bdAvailable)("filters by status", async () => {
+			const id1 = await client.create("Open issue");
+			const id2 = await client.create("Claimed issue");
+			await client.claim(id2);
 
-			await client.list({ status: "open" });
+			const openIssues = await client.list({ status: "open" });
+			const openIds = openIssues.map((i) => i.id);
+			expect(openIds).toContain(id1);
+			expect(openIds).not.toContain(id2);
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "list", "--json", "--status", "open"]);
+			const inProgressIssues = await client.list({ status: "in_progress" });
+			const inProgressIds = inProgressIssues.map((i) => i.id);
+			expect(inProgressIds).toContain(id2);
+			expect(inProgressIds).not.toContain(id1);
 		});
 
-		test("passes --limit filter", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify([sampleIssue]), "", 0) as Subprocess,
-			);
+		test.skipIf(!bdAvailable)("respects limit option", async () => {
+			await client.create("Limit issue 1");
+			await client.create("Limit issue 2");
+			await client.create("Limit issue 3");
 
-			await client.list({ limit: 5 });
+			const limited = await client.list({ limit: 1 });
+			expect(limited).toHaveLength(1);
+		});
+	});
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "list", "--json", "--limit", "5"]);
+	describe("ready", () => {
+		test.skipIf(!bdAvailable)("returns open unblocked issues", async () => {
+			const id = await client.create("Ready issue");
+
+			const readyIssues = await client.ready();
+
+			const readyIds = readyIssues.map((i) => i.id);
+			expect(readyIds).toContain(id);
 		});
 
-		test("passes both --status and --limit filters", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify(sampleIssueList), "", 0) as Subprocess,
-			);
+		test.skipIf(!bdAvailable)("does not return in_progress issues", async () => {
+			const id = await client.create("Claimed ready issue");
+			await client.claim(id);
 
-			await client.list({ status: "in_progress", limit: 10 });
+			const readyIssues = await client.ready();
 
-			const cmd = getSpawnCmd(spawnSpy);
-			expect(cmd).toEqual(["bd", "list", "--json", "--status", "in_progress", "--limit", "10"]);
+			const readyIds = readyIssues.map((i) => i.id);
+			expect(readyIds).not.toContain(id);
+		});
+
+		test.skipIf(!bdAvailable)("does not return closed issues", async () => {
+			const id = await client.create("Closed ready issue");
+			await client.close(id);
+
+			const readyIssues = await client.ready();
+
+			const readyIds = readyIssues.map((i) => i.id);
+			expect(readyIds).not.toContain(id);
 		});
 	});
 
 	describe("error handling", () => {
-		test("throws AgentError on non-zero exit code", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult("", "bd: issue not found", 1) as Subprocess,
-			);
-
-			await expect(client.show("nonexistent")).rejects.toThrow(AgentError);
+		test.skipIf(!bdAvailable)("show throws AgentError for nonexistent ID", async () => {
+			await expect(client.show("nonexistent-id")).rejects.toThrow(AgentError);
 		});
 
-		test("includes stderr in AgentError message", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult("", "bd: permission denied", 1) as Subprocess,
-			);
+		test.skipIf(!bdAvailable)(
+			"throws AgentError when bd is run without beads initialized",
+			async () => {
+				// Create a git repo without bd init
+				const bareDir = realpathSync(await createTempGitRepo());
+				const bareClient = createBeadsClient(bareDir);
 
-			try {
-				await client.ready();
-				// Should not reach here
-				expect(true).toBe(false);
-			} catch (err) {
-				expect(err).toBeInstanceOf(AgentError);
-				expect((err as AgentError).message).toContain("permission denied");
-			}
-		});
-
-		test("throws AgentError on empty stdout for JSON commands", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0) as Subprocess);
-
-			await expect(client.ready()).rejects.toThrow(AgentError);
-		});
-
-		test("throws AgentError on empty stdout with whitespace", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("   \n  ", "", 0) as Subprocess);
-
-			await expect(client.show("test-1")).rejects.toThrow(AgentError);
-		});
-
-		test("throws AgentError on malformed JSON", async () => {
-			spawnSpy.mockImplementation(() => mockSpawnResult("{not valid json", "", 0) as Subprocess);
-
-			await expect(client.list()).rejects.toThrow(AgentError);
-		});
-
-		test("AgentError on malformed JSON includes truncated output", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult("this is not json at all", "", 0) as Subprocess,
-			);
-
-			try {
-				await client.ready();
-				expect(true).toBe(false);
-			} catch (err) {
-				expect(err).toBeInstanceOf(AgentError);
-				expect((err as AgentError).message).toContain("Failed to parse JSON");
-				expect((err as AgentError).message).toContain("this is not json at all");
-			}
-		});
-	});
-
-	describe("cwd propagation", () => {
-		test("passes cwd to Bun.spawn", async () => {
-			spawnSpy.mockImplementation(
-				() => mockSpawnResult(JSON.stringify(sampleIssueList), "", 0) as Subprocess,
-			);
-
-			await client.ready();
-
-			const options = getSpawnOptions(spawnSpy);
-			expect(options.cwd).toBe("/fake/project");
-		});
+				try {
+					await expect(bareClient.list()).rejects.toThrow(AgentError);
+				} finally {
+					await cleanupTempDir(bareDir);
+				}
+			},
+		);
 	});
 });

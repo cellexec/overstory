@@ -1,95 +1,103 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, realpathSync } from "node:fs";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WorktreeError } from "../errors.ts";
+import { cleanupTempDir, commitFile, createTempGitRepo } from "../test-helpers.ts";
 import { createWorktree, listWorktrees, removeWorktree } from "./manager.ts";
 
 /**
- * Helper to create a mock Bun.spawn return value.
- *
- * The actual code reads stdout/stderr via `new Response(proc.stdout).text()`
- * and `new Response(proc.stderr).text()`, so we need ReadableStreams.
- * `new Response("text").body!` creates the right type.
+ * Run a git command in a directory and return stdout. Throws on non-zero exit.
  */
-function mockSpawnResult(
-	stdout: string,
-	stderr: string,
-	exitCode: number,
-): {
-	stdout: ReadableStream<Uint8Array>;
-	stderr: ReadableStream<Uint8Array>;
-	exited: Promise<number>;
-	pid: number;
-} {
-	return {
-		stdout: new Response(stdout).body as ReadableStream<Uint8Array>,
-		stderr: new Response(stderr).body as ReadableStream<Uint8Array>,
-		exited: Promise.resolve(exitCode),
-		pid: 12345,
-	};
+async function git(cwd: string, args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+
+	if (exitCode !== 0) {
+		throw new Error(`git ${args.join(" ")} failed (exit ${exitCode}): ${stderr.trim()}`);
+	}
+
+	return stdout;
 }
 
 describe("createWorktree", () => {
-	let spawnSpy: ReturnType<typeof spyOn>;
+	let repoDir: string;
+	let worktreesDir: string;
 
-	beforeEach(() => {
-		spawnSpy = spyOn(Bun, "spawn");
+	beforeEach(async () => {
+		// realpathSync resolves macOS /var -> /private/var symlink so paths match git output
+		repoDir = realpathSync(await createTempGitRepo());
+		worktreesDir = join(repoDir, ".overstory", "worktrees");
+		await mkdir(worktreesDir, { recursive: true });
 	});
 
-	afterEach(() => {
-		spawnSpy.mockRestore();
+	afterEach(async () => {
+		await cleanupTempDir(repoDir);
 	});
 
-	test("builds correct branch name and returns path and branch", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0));
-
+	test("returns correct path and branch name", async () => {
 		const result = await createWorktree({
-			repoRoot: "/repo",
-			baseDir: "/repo/.overstory/worktrees",
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
 			agentName: "auth-login",
 			baseBranch: "main",
 			beadId: "bead-abc123",
 		});
 
-		expect(result.path).toBe("/repo/.overstory/worktrees/auth-login");
+		expect(result.path).toBe(join(worktreesDir, "auth-login"));
 		expect(result.branch).toBe("overstory/auth-login/bead-abc123");
 	});
 
-	test("passes correct args to git worktree add", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0));
-
-		await createWorktree({
-			repoRoot: "/repo",
-			baseDir: "/repo/.overstory/worktrees",
+	test("creates worktree directory on disk", async () => {
+		const result = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
 			agentName: "auth-login",
 			baseBranch: "main",
 			beadId: "bead-abc123",
 		});
 
-		expect(spawnSpy).toHaveBeenCalledTimes(1);
-		const callArgs = spawnSpy.mock.calls[0] as unknown[];
-		const cmd = callArgs[0] as string[];
-		expect(cmd).toEqual([
-			"git",
-			"worktree",
-			"add",
-			"-b",
-			"overstory/auth-login/bead-abc123",
-			"/repo/.overstory/worktrees/auth-login",
-			"main",
-		]);
-
-		const opts = callArgs[1] as { cwd: string; stdout: string; stderr: string };
-		expect(opts.cwd).toBe("/repo");
-		expect(opts.stdout).toBe("pipe");
-		expect(opts.stderr).toBe("pipe");
+		expect(existsSync(result.path)).toBe(true);
+		// The worktree should contain a .git file (not a directory, since it's a linked worktree)
+		expect(existsSync(join(result.path, ".git"))).toBe(true);
 	});
 
-	test("throws WorktreeError on git failure", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "fatal: branch already exists", 128));
+	test("creates the branch in the repo", async () => {
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc123",
+		});
+
+		const branchList = await git(repoDir, ["branch", "--list"]);
+		expect(branchList).toContain("overstory/auth-login/bead-abc123");
+	});
+
+	test("throws WorktreeError when creating same worktree twice", async () => {
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc123",
+		});
 
 		await expect(
 			createWorktree({
-				repoRoot: "/repo",
-				baseDir: "/repo/.overstory/worktrees",
+				repoRoot: repoDir,
+				baseDir: worktreesDir,
 				agentName: "auth-login",
 				baseBranch: "main",
 				beadId: "bead-abc123",
@@ -97,13 +105,20 @@ describe("createWorktree", () => {
 		).rejects.toThrow(WorktreeError);
 	});
 
-	test("WorktreeError includes git error message", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "fatal: branch already exists", 128));
+	test("WorktreeError includes worktree path and branch name", async () => {
+		// Create once to occupy the branch name
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc123",
+		});
 
 		try {
 			await createWorktree({
-				repoRoot: "/repo",
-				baseDir: "/repo/.overstory/worktrees",
+				repoRoot: repoDir,
+				baseDir: worktreesDir,
 				agentName: "auth-login",
 				baseBranch: "main",
 				beadId: "bead-abc123",
@@ -113,215 +128,233 @@ describe("createWorktree", () => {
 		} catch (err: unknown) {
 			expect(err).toBeInstanceOf(WorktreeError);
 			const wtErr = err as WorktreeError;
-			expect(wtErr.message).toContain("fatal: branch already exists");
-			expect(wtErr.worktreePath).toBe("/repo/.overstory/worktrees/auth-login");
+			expect(wtErr.worktreePath).toBe(join(worktreesDir, "auth-login"));
 			expect(wtErr.branchName).toBe("overstory/auth-login/bead-abc123");
 		}
 	});
 });
 
 describe("listWorktrees", () => {
-	let spawnSpy: ReturnType<typeof spyOn>;
+	let repoDir: string;
+	let worktreesDir: string;
 
-	beforeEach(() => {
-		spawnSpy = spyOn(Bun, "spawn");
+	beforeEach(async () => {
+		repoDir = realpathSync(await createTempGitRepo());
+		worktreesDir = join(repoDir, ".overstory", "worktrees");
+		await mkdir(worktreesDir, { recursive: true });
 	});
 
-	afterEach(() => {
-		spawnSpy.mockRestore();
+	afterEach(async () => {
+		await cleanupTempDir(repoDir);
 	});
 
-	test("parses porcelain output with multiple entries", async () => {
-		const porcelainOutput = [
-			"worktree /repo",
-			"HEAD abc123def456",
-			"branch refs/heads/main",
-			"",
-			"worktree /repo/.overstory/worktrees/auth-login",
-			"HEAD def456abc789",
-			"branch refs/heads/overstory/auth-login/bead-abc",
-			"",
-			"worktree /repo/.overstory/worktrees/data-sync",
-			"HEAD 789abcdef012",
-			"branch refs/heads/overstory/data-sync/bead-xyz",
-		].join("\n");
+	test("lists main worktree when no additional worktrees exist", async () => {
+		const entries = await listWorktrees(repoDir);
 
-		spawnSpy.mockImplementation(() => mockSpawnResult(porcelainOutput, "", 0));
+		expect(entries.length).toBeGreaterThanOrEqual(1);
+		// The first entry should be the main repo
+		const mainEntry = entries[0];
+		expect(mainEntry?.path).toBe(repoDir);
+		expect(mainEntry?.branch).toMatch(/^(main|master)$/);
+		expect(mainEntry?.head).toMatch(/^[a-f0-9]{40}$/);
+	});
 
-		const entries = await listWorktrees("/repo");
+	test("lists multiple worktrees after creation", async () => {
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
+		});
 
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "data-sync",
+			baseBranch: "main",
+			beadId: "bead-xyz",
+		});
+
+		const entries = await listWorktrees(repoDir);
+
+		// Main worktree + 2 created = 3
 		expect(entries).toHaveLength(3);
 
-		expect(entries[0]?.path).toBe("/repo");
-		expect(entries[0]?.head).toBe("abc123def456");
-		expect(entries[0]?.branch).toBe("main");
+		const paths = entries.map((e) => e.path);
+		expect(paths).toContain(repoDir);
+		expect(paths).toContain(join(worktreesDir, "auth-login"));
+		expect(paths).toContain(join(worktreesDir, "data-sync"));
 
-		expect(entries[1]?.path).toBe("/repo/.overstory/worktrees/auth-login");
-		expect(entries[1]?.head).toBe("def456abc789");
-		expect(entries[1]?.branch).toBe("overstory/auth-login/bead-abc");
-
-		expect(entries[2]?.path).toBe("/repo/.overstory/worktrees/data-sync");
-		expect(entries[2]?.head).toBe("789abcdef012");
-		expect(entries[2]?.branch).toBe("overstory/data-sync/bead-xyz");
+		const branches = entries.map((e) => e.branch);
+		expect(branches).toContain("overstory/auth-login/bead-abc");
+		expect(branches).toContain("overstory/data-sync/bead-xyz");
 	});
 
 	test("strips refs/heads/ prefix from branch names", async () => {
-		const porcelainOutput = [
-			"worktree /repo",
-			"HEAD abc123",
-			"branch refs/heads/feature/my-branch",
-		].join("\n");
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "feature-worker",
+			baseBranch: "main",
+			beadId: "bead-123",
+		});
 
-		spawnSpy.mockImplementation(() => mockSpawnResult(porcelainOutput, "", 0));
+		const entries = await listWorktrees(repoDir);
+		const worktreeEntry = entries.find((e) => e.path === join(worktreesDir, "feature-worker"));
 
-		const entries = await listWorktrees("/repo");
-
-		expect(entries).toHaveLength(1);
-		expect(entries[0]?.branch).toBe("feature/my-branch");
+		expect(worktreeEntry?.branch).toBe("overstory/feature-worker/bead-123");
+		// Ensure no refs/heads/ prefix leaked through
+		expect(worktreeEntry?.branch).not.toContain("refs/heads/");
 	});
 
-	test("handles empty output", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0));
+	test("each entry has a valid HEAD commit hash", async () => {
+		await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
+		});
 
-		const entries = await listWorktrees("/repo");
+		const entries = await listWorktrees(repoDir);
 
-		expect(entries).toHaveLength(0);
+		for (const entry of entries) {
+			expect(entry.head).toMatch(/^[a-f0-9]{40}$/);
+		}
 	});
 
-	test("throws WorktreeError on git failure", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "fatal: not a git repository", 128));
-
-		await expect(listWorktrees("/not-a-repo")).rejects.toThrow(WorktreeError);
-	});
-
-	test("passes correct args to git worktree list --porcelain", async () => {
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0));
-
-		await listWorktrees("/repo");
-
-		expect(spawnSpy).toHaveBeenCalledTimes(1);
-		const callArgs = spawnSpy.mock.calls[0] as unknown[];
-		const cmd = callArgs[0] as string[];
-		expect(cmd).toEqual(["git", "worktree", "list", "--porcelain"]);
+	test("throws WorktreeError for non-git directory", async () => {
+		// Use a separate temp dir outside the git repo so git won't find a parent .git
+		const tmpDir = realpathSync(await mkdtemp(join(tmpdir(), "overstory-notgit-")));
+		try {
+			await expect(listWorktrees(tmpDir)).rejects.toThrow(WorktreeError);
+		} finally {
+			await cleanupTempDir(tmpDir);
+		}
 	});
 });
 
 describe("removeWorktree", () => {
-	let spawnSpy: ReturnType<typeof spyOn>;
+	let repoDir: string;
+	let worktreesDir: string;
 
-	beforeEach(() => {
-		spawnSpy = spyOn(Bun, "spawn");
+	beforeEach(async () => {
+		repoDir = realpathSync(await createTempGitRepo());
+		worktreesDir = join(repoDir, ".overstory", "worktrees");
+		await mkdir(worktreesDir, { recursive: true });
 	});
 
-	afterEach(() => {
-		spawnSpy.mockRestore();
+	afterEach(async () => {
+		await cleanupTempDir(repoDir);
 	});
 
-	test("calls listWorktrees, then worktree remove, then branch -d", async () => {
-		const porcelainOutput = [
-			"worktree /repo/.overstory/worktrees/auth-login",
-			"HEAD def456abc789",
-			"branch refs/heads/overstory/auth-login/bead-abc",
-		].join("\n");
-
-		let callCount = 0;
-		spawnSpy.mockImplementation(() => {
-			callCount++;
-			if (callCount === 1) {
-				// listWorktrees: git worktree list --porcelain
-				return mockSpawnResult(porcelainOutput, "", 0);
-			}
-			if (callCount === 2) {
-				// removeWorktree: git worktree remove
-				return mockSpawnResult("", "", 0);
-			}
-			// branch -d
-			return mockSpawnResult("", "", 0);
+	test("removes worktree directory from disk", async () => {
+		const { path: wtPath } = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
 		});
 
-		await removeWorktree("/repo", "/repo/.overstory/worktrees/auth-login");
+		expect(existsSync(wtPath)).toBe(true);
 
-		expect(spawnSpy).toHaveBeenCalledTimes(3);
+		await removeWorktree(repoDir, wtPath);
 
-		// First call: list worktrees
-		const listArgs = (spawnSpy.mock.calls[0] as unknown[])[0] as string[];
-		expect(listArgs).toEqual(["git", "worktree", "list", "--porcelain"]);
-
-		// Second call: remove worktree
-		const removeArgs = (spawnSpy.mock.calls[1] as unknown[])[0] as string[];
-		expect(removeArgs).toEqual([
-			"git",
-			"worktree",
-			"remove",
-			"/repo/.overstory/worktrees/auth-login",
-		]);
-
-		// Third call: delete branch
-		const branchArgs = (spawnSpy.mock.calls[2] as unknown[])[0] as string[];
-		expect(branchArgs).toEqual(["git", "branch", "-d", "overstory/auth-login/bead-abc"]);
+		expect(existsSync(wtPath)).toBe(false);
 	});
 
-	test("ignores branch deletion failure (unmerged branch)", async () => {
-		const porcelainOutput = [
-			"worktree /repo/.overstory/worktrees/auth-login",
-			"HEAD def456abc789",
-			"branch refs/heads/overstory/auth-login/bead-abc",
-		].join("\n");
-
-		let callCount = 0;
-		spawnSpy.mockImplementation(() => {
-			callCount++;
-			if (callCount === 1) {
-				// listWorktrees
-				return mockSpawnResult(porcelainOutput, "", 0);
-			}
-			if (callCount === 2) {
-				// worktree remove - success
-				return mockSpawnResult("", "", 0);
-			}
-			// branch -d - fails because branch is not merged
-			return mockSpawnResult(
-				"",
-				"error: the branch 'overstory/auth-login/bead-abc' is not fully merged",
-				1,
-			);
+	test("deletes the associated branch after removal", async () => {
+		const { path: wtPath } = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
 		});
 
-		// Should NOT throw despite the branch -d failure
-		await removeWorktree("/repo", "/repo/.overstory/worktrees/auth-login");
+		await removeWorktree(repoDir, wtPath);
+
+		const branchList = await git(repoDir, ["branch", "--list"]);
+		expect(branchList).not.toContain("overstory/auth-login/bead-abc");
 	});
 
-	test("throws WorktreeError when worktree remove fails", async () => {
-		const porcelainOutput = [
-			"worktree /repo/.overstory/worktrees/auth-login",
-			"HEAD def456abc789",
-			"branch refs/heads/overstory/auth-login/bead-abc",
-		].join("\n");
-
-		let callCount = 0;
-		spawnSpy.mockImplementation(() => {
-			callCount++;
-			if (callCount === 1) {
-				// listWorktrees
-				return mockSpawnResult(porcelainOutput, "", 0);
-			}
-			// worktree remove - failure
-			return mockSpawnResult("", "fatal: cannot remove", 128);
+	test("worktree no longer appears in listWorktrees after removal", async () => {
+		const { path: wtPath } = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
 		});
 
-		await expect(removeWorktree("/repo", "/repo/.overstory/worktrees/auth-login")).rejects.toThrow(
-			WorktreeError,
-		);
+		await removeWorktree(repoDir, wtPath);
+
+		const entries = await listWorktrees(repoDir);
+		const paths = entries.map((e) => e.path);
+		expect(paths).not.toContain(wtPath);
 	});
 
-	test("skips branch deletion when worktree path is not found in list", async () => {
-		// Empty worktree list - path won't be found
-		spawnSpy.mockImplementation(() => mockSpawnResult("", "", 0));
+	test("force flag removes worktree with uncommitted changes", async () => {
+		const { path: wtPath } = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
+		});
 
-		await removeWorktree("/repo", "/repo/.overstory/worktrees/unknown");
+		// Create an untracked file in the worktree
+		await Bun.write(join(wtPath, "untracked.txt"), "some content");
 
-		// Calls: listWorktrees (1) + worktree remove (2) = 2 total
-		// No branch -d because branch is empty string
-		expect(spawnSpy).toHaveBeenCalledTimes(2);
+		// Without force, git worktree remove may fail on dirty worktrees.
+		// With force, it should succeed.
+		await removeWorktree(repoDir, wtPath, { force: true, forceBranch: true });
+
+		expect(existsSync(wtPath)).toBe(false);
+	});
+
+	test("forceBranch deletes unmerged branch", async () => {
+		const { path: wtPath } = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
+		});
+
+		// Add a commit in the worktree so the branch diverges (making it "unmerged")
+		await commitFile(wtPath, "new-file.ts", "export const x = 1;", "add new file");
+
+		// forceBranch uses -D instead of -d, so even unmerged branches get deleted
+		await removeWorktree(repoDir, wtPath, { force: true, forceBranch: true });
+
+		const branchList = await git(repoDir, ["branch", "--list"]);
+		expect(branchList).not.toContain("overstory/auth-login/bead-abc");
+	});
+
+	test("without forceBranch, unmerged branch deletion is silently ignored", async () => {
+		const { path: wtPath } = await createWorktree({
+			repoRoot: repoDir,
+			baseDir: worktreesDir,
+			agentName: "auth-login",
+			baseBranch: "main",
+			beadId: "bead-abc",
+		});
+
+		// Add a commit to make the branch unmerged
+		await commitFile(wtPath, "new-file.ts", "export const x = 1;", "add new file");
+
+		// Without forceBranch, branch -d will fail because it's not merged, but
+		// removeWorktree should not throw (it catches the error)
+		await removeWorktree(repoDir, wtPath, { force: true });
+
+		// Worktree is gone
+		expect(existsSync(wtPath)).toBe(false);
+
+		// But branch still exists because -d failed silently
+		const branchList = await git(repoDir, ["branch", "--list"]);
+		expect(branchList).toContain("overstory/auth-login/bead-abc");
 	});
 });
