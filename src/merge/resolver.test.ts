@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { MergeError } from "../src/errors.ts";
-import { createMergeResolver } from "../src/merge/resolver.ts";
-import type { MergeEntry } from "../src/types.ts";
+import { MergeError } from "../errors.ts";
+import type { MergeEntry } from "../types.ts";
+import { createMergeResolver } from "./resolver.ts";
 
 /**
  * Helper to create a mock Bun.spawn return value.

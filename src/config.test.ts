@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_CONFIG, loadConfig } from "../src/config.ts";
-import { ValidationError } from "../src/errors.ts";
+import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
+import { ValidationError } from "./errors.ts";
 
 describe("loadConfig", () => {
 	let tempDir: string;

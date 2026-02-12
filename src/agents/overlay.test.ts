@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateOverlay, writeOverlay } from "../src/agents/overlay.ts";
-import type { OverlayConfig } from "../src/types.ts";
+import type { OverlayConfig } from "../types.ts";
+import { generateOverlay, writeOverlay } from "./overlay.ts";
 
 /** Build a complete OverlayConfig with sensible defaults, overrideable by partial. */
 function makeConfig(overrides?: Partial<OverlayConfig>): OverlayConfig {

@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createManifestLoader } from "../src/agents/manifest.ts";
-import { AgentError } from "../src/errors.ts";
+import { AgentError } from "../errors.ts";
+import { createManifestLoader } from "./manifest.ts";
 
 const VALID_MANIFEST = {
 	version: "1.0",

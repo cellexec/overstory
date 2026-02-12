@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { WorktreeError } from "../src/errors.ts";
-import { createWorktree, listWorktrees, removeWorktree } from "../src/worktree/manager.ts";
+import { WorktreeError } from "../errors.ts";
+import { createWorktree, listWorktrees, removeWorktree } from "./manager.ts";
 
 /**
  * Helper to create a mock Bun.spawn return value.

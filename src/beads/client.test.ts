@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Subprocess } from "bun";
-import { type BeadIssue, type BeadsClient, createBeadsClient } from "../src/beads/client.ts";
-import { AgentError } from "../src/errors.ts";
+import { AgentError } from "../errors.ts";
+import { type BeadIssue, type BeadsClient, createBeadsClient } from "./client.ts";
 
 /**
  * Helper to extract the command array from a Bun.spawn spy call.

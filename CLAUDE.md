@@ -105,7 +105,7 @@ overstory/                        # This repo (the overstory tool itself)
     CLAUDE.md.tmpl                # Template for orchestrator CLAUDE.md
     overlay.md.tmpl               # Template for per-worker overlay
     hooks.json.tmpl               # Template for settings.local.json
-  __tests__/                      # All tests live here
+  # Tests colocated: src/config.test.ts, src/mail/store.test.ts, etc.
 ```
 
 ### What `overstory init` creates in a target project
@@ -154,7 +154,7 @@ target-project/
 - Each subsystem gets its own directory under `src/` (agents, worktree, beads, mail, etc.)
 - Base agent definitions (`.md` files) live in `agents/` at the repo root
 - Templates live in `templates/` at the repo root
-- Tests live in `__tests__/` at the repo root
+- Tests are colocated with source files (e.g., `src/config.test.ts`, `src/mail/store.test.ts`)
 
 ### Subprocess Execution
 
@@ -243,12 +243,36 @@ overstory metrics                       Show session metrics
 ## Testing
 
 - **Framework:** `bun test` (built-in, Jest-compatible API)
-- **Test location:** All tests in `__tests__/` directory at repo root
-- **Naming:** `{module}.test.ts` (e.g., `config.test.ts`, `mail-store.test.ts`)
+- **Test location:** Tests colocated with source files (e.g., `src/config.test.ts`, `src/mail/store.test.ts`)
+- **Naming:** `{module}.test.ts` matching the source file name
 - **Run tests:** `bun test`
-- **Run single test:** `bun test __tests__/config.test.ts`
+- **Run single test:** `bun test src/config.test.ts`
 
-Tests should mock subprocess calls (`Bun.spawn`) rather than requiring real `git`, `tmux`, `bd`, or `mulch` binaries. Use temp directories for filesystem tests. SQLite tests use in-memory databases or temp files.
+### Philosophy: Never mock what you can use for real
+
+Prefer real implementations over mocks. Mocks are a last resort, not a default.
+
+**Use real implementations for:**
+- **Filesystem:** Use temp directories (`mkdtemp`) for file I/O tests
+- **SQLite:** Use temp files or `:memory:` databases for `bun:sqlite` tests
+- **Git:** Use real git repos in temp directories for worktree/merge tests
+- **CLI tools:** Use real `bd` CLI for beads-client tests (when available)
+
+**Only mock when the real thing has unacceptable side effects:**
+- **tmux:** Real tmux operations interfere with developer sessions and are fragile in CI
+- **External AI services:** API calls with real costs and latency
+- **Network requests:** Flaky in CI, may incur costs
+
+When mocking is truly necessary, document WHY in a comment at the top of the test file.
+
+See mulch record `mx-56558b` for background on why `mock.module()` should be avoided (it leaks across test files).
+
+### Test Helpers
+
+Shared test utilities live in `src/test-helpers.ts`:
+- `createTempGitRepo()` -- Initialize a real git repo in a temp dir with initial commit
+- `cleanupTempDir()` -- Remove temp directories
+- `commitFile()` -- Add and commit a file to a test repo
 
 ## Tool Integration
 

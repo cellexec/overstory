@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { AgentError } from "../src/errors.ts";
-import {
-	createSession,
-	isSessionAlive,
-	killSession,
-	listSessions,
-	sendKeys,
-} from "../src/worktree/tmux.ts";
+import { AgentError } from "../errors.ts";
+import { createSession, isSessionAlive, killSession, listSessions, sendKeys } from "./tmux.ts";
+
+/**
+ * tmux tests use Bun.spawn mocks — legitimate exception to "never mock what you can use for real".
+ * Real tmux operations would hijack the developer's session and are unavailable in CI.
+ */
 
 /**
  * Helper to create a mock Bun.spawn return value.

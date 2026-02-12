@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { calculateStaggerDelay } from "../src/commands/sling.ts";
+import { calculateStaggerDelay } from "./sling.ts";
 
 /**
  * Tests for the stagger delay enforcement in the sling command (step 4b).

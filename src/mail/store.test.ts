@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MailError } from "../src/errors.ts";
-import { type MailStore, createMailStore } from "../src/mail/store.ts";
+import { MailError } from "../errors.ts";
+import { type MailStore, createMailStore } from "./store.ts";
 
 describe("createMailStore", () => {
 	let tempDir: string;
