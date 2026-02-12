@@ -219,6 +219,11 @@ overstory mail list                     List messages with filters
 overstory mail read <id>                Mark message as read
 overstory mail reply <id> --body <text> Reply in same thread
 
+overstory nudge <agent> [message]       Send a text nudge to an agent
+  --from <name>                          Sender name (default: orchestrator)
+  --force                                Skip debounce check
+  --json                                 JSON output
+
 overstory merge                         Merge agent branches into canonical
   --branch <name>                        Specific branch
   --all                                  All completed branches

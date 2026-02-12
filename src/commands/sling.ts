@@ -25,7 +25,7 @@ import { loadConfig } from "../config.ts";
 import { AgentError, ValidationError } from "../errors.ts";
 import type { AgentSession, OverlayConfig } from "../types.ts";
 import { createWorktree } from "../worktree/manager.ts";
-import { createSession } from "../worktree/tmux.ts";
+import { createSession, sendKeys } from "../worktree/tmux.ts";
 
 /**
  * Calculate how many milliseconds to sleep before spawning a new agent,
@@ -90,6 +90,48 @@ async function loadSessions(sessionsPath: string): Promise<AgentSession[]> {
  */
 async function saveSessions(sessionsPath: string, sessions: AgentSession[]): Promise<void> {
 	await Bun.write(sessionsPath, `${JSON.stringify(sessions, null, "\t")}\n`);
+}
+
+/**
+ * Options for building the structured startup beacon.
+ */
+export interface BeaconOptions {
+	agentName: string;
+	capability: string;
+	taskId: string;
+	parentAgent: string | null;
+	depth: number;
+}
+
+/**
+ * Build a structured startup beacon for an agent.
+ *
+ * The beacon is the first user message sent to a Claude Code agent via
+ * tmux send-keys. It provides identity context and a numbered startup
+ * protocol so the agent knows exactly what to do on boot.
+ *
+ * Format:
+ *   [OVERSTORY] <agent-name> (<capability>) <ISO timestamp> task:<bead-id>
+ *   Depth: <n> | Parent: <parent-name|none>
+ *   Startup protocol:
+ *   1. Read your assignment in .claude/CLAUDE.md
+ *   2. Load expertise: mulch prime
+ *   3. Check mail: overstory mail check --agent <name>
+ *   4. Begin working on task <bead-id>
+ */
+export function buildBeacon(opts: BeaconOptions): string {
+	const timestamp = new Date().toISOString();
+	const parent = opts.parentAgent ?? "none";
+	const lines = [
+		`[OVERSTORY] ${opts.agentName} (${opts.capability}) ${timestamp} task:${opts.taskId}`,
+		`Depth: ${opts.depth} | Parent: ${parent}`,
+		"Startup protocol:",
+		"1. Read your assignment in .claude/CLAUDE.md",
+		"2. Load expertise: mulch prime",
+		`3. Check mail: overstory mail check --agent ${opts.agentName}`,
+		`4. Begin working on task ${opts.taskId}`,
+	];
+	return lines.join("\n");
 }
 
 /**
@@ -280,8 +322,8 @@ export async function slingCommand(args: string[]): Promise<void> {
 
 	await writeOverlay(worktreePath, overlayConfig);
 
-	// 8. Deploy hooks config
-	await deployHooks(worktreePath, name);
+	// 8. Deploy hooks config (capability-specific guards)
+	await deployHooks(worktreePath, name, capability);
 
 	// 9. Claim beads issue
 	if (config.beads.enabled) {
@@ -306,18 +348,28 @@ export async function slingCommand(args: string[]): Promise<void> {
 		});
 	}
 
-	// 11. Create tmux session running claude in headless mode (-p)
+	// 11. Create tmux session running claude in interactive mode
 	const tmuxSessionName = `overstory-${name}`;
-	const prompt = `Read your assignment in .claude/CLAUDE.md and begin working on task ${taskId}`;
-	const claudeCmd = `claude -p "${prompt}" --model ${agentDef.model} --dangerously-skip-permissions`;
+	const claudeCmd = `claude --model ${agentDef.model} --dangerously-skip-permissions`;
 	const pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
 		OVERSTORY_AGENT_NAME: name,
 	});
 
+	// 11b. Send beacon prompt via tmux send-keys
+	// Allow Claude Code time to initialize its TUI before sending input
+	await Bun.sleep(2_000);
+	const beacon = buildBeacon({
+		agentName: name,
+		capability,
+		taskId,
+		parentAgent,
+		depth,
+	});
+	await sendKeys(tmuxSessionName, beacon);
+
 	// 12. Record session
-	// Set initial state to 'working' since agents are spawned in headless mode
-	// (claude -p) where SessionStart/UserPromptSubmit hooks don't fire, so the
-	// hook-based booting->working transition in log.ts would never occur.
+	// Initial state is 'booting' — hooks (SessionStart, PreToolUse) will
+	// transition to 'working' when the agent begins processing.
 	const session: AgentSession = {
 		id: `session-${Date.now()}-${name}`,
 		agentName: name,
@@ -326,7 +378,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 		branchName,
 		beadId: taskId,
 		tmuxSession: tmuxSessionName,
-		state: "working",
+		state: "booting",
 		pid,
 		parentAgent: parentAgent,
 		depth,

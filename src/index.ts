@@ -11,6 +11,7 @@ import { logCommand } from "./commands/log.ts";
 import { mailCommand } from "./commands/mail.ts";
 import { mergeCommand } from "./commands/merge.ts";
 import { metricsCommand } from "./commands/metrics.ts";
+import { nudgeCommand } from "./commands/nudge.ts";
 import { primeCommand } from "./commands/prime.ts";
 import { slingCommand } from "./commands/sling.ts";
 import { statusCommand } from "./commands/status.ts";
@@ -31,6 +32,7 @@ Commands:
   status                  Show all active agents and project state
   mail <sub>              Mail system (send/check/list/read/reply)
   merge                   Merge agent branches into canonical
+  nudge <agent> [msg]     Send a text nudge to an agent
   worktree <sub>          Manage worktrees (list/clean)
   log <event>             Log a hook event
   watch                   Start watchdog daemon
@@ -49,6 +51,7 @@ const COMMANDS = [
 	"status",
 	"mail",
 	"merge",
+	"nudge",
 	"worktree",
 	"log",
 	"watch",
@@ -121,6 +124,9 @@ async function main(): Promise<void> {
 			break;
 		case "merge":
 			await mergeCommand(commandArgs);
+			break;
+		case "nudge":
+			await nudgeCommand(commandArgs);
 			break;
 		case "worktree":
 			await worktreeCommand(commandArgs);

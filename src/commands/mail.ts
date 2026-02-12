@@ -12,6 +12,7 @@ import { MailError, ValidationError } from "../errors.ts";
 import { createMailClient } from "../mail/client.ts";
 import { createMailStore } from "../mail/store.ts";
 import type { MailMessage } from "../types.ts";
+import { nudgeAgent } from "./nudge.ts";
 
 /**
  * Parse a named flag value from an args array.
@@ -94,7 +95,7 @@ function openClient(cwd: string) {
 }
 
 /** overstory mail send */
-function handleSend(args: string[], cwd: string): void {
+async function handleSend(args: string[], cwd: string): Promise<void> {
 	const to = getFlag(args, "--to");
 	const subject = getFlag(args, "--subject");
 	const body = getFlag(args, "--body");
@@ -139,6 +140,18 @@ function handleSend(args: string[], cwd: string): void {
 			process.stdout.write(`${JSON.stringify({ id })}\n`);
 		} else {
 			process.stdout.write(`✉️  Sent message ${id} to ${to}\n`);
+		}
+
+		// Auto-nudge for urgent/high priority mail
+		if (priority === "urgent" || priority === "high") {
+			const result = await nudgeAgent(
+				cwd,
+				to,
+				`[NUDGE from ${from}] New ${priority} mail: ${subject}`,
+			);
+			if (result.delivered && !hasFlag(args, "--json")) {
+				process.stdout.write(`📢 Auto-nudged "${to}" (${priority} priority)\n`);
+			}
 		}
 	} finally {
 		client.close();
@@ -346,7 +359,7 @@ export async function mailCommand(args: string[]): Promise<void> {
 
 	switch (subcommand) {
 		case "send":
-			handleSend(subArgs, root);
+			await handleSend(subArgs, root);
 			break;
 		case "check":
 			handleCheck(subArgs, root);

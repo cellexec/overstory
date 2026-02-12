@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { calculateStaggerDelay } from "./sling.ts";
+import { type BeaconOptions, buildBeacon, calculateStaggerDelay } from "./sling.ts";
 
 /**
  * Tests for the stagger delay enforcement in the sling command (step 4b).
@@ -147,5 +147,109 @@ describe("calculateStaggerDelay", () => {
 		const delay = calculateStaggerDelay(5_000, sessions, now);
 
 		expect(delay).toBe(0);
+	});
+});
+
+/**
+ * Tests for the structured startup beacon sent to agents via tmux send-keys.
+ *
+ * buildBeacon is a pure function that constructs the first user message an
+ * agent sees. It includes identity context (name, capability, task ID),
+ * hierarchy info (depth, parent), and a numbered startup protocol.
+ */
+
+function makeBeaconOpts(overrides?: Partial<BeaconOptions>): BeaconOptions {
+	return {
+		agentName: "test-builder",
+		capability: "builder",
+		taskId: "overstory-abc",
+		parentAgent: null,
+		depth: 0,
+		...overrides,
+	};
+}
+
+describe("buildBeacon", () => {
+	test("includes header line with agent identity and task ID", () => {
+		const beacon = buildBeacon(makeBeaconOpts());
+		const firstLine = beacon.split("\n")[0] ?? "";
+
+		expect(firstLine).toStartWith("[OVERSTORY] test-builder (builder) ");
+		expect(firstLine).toEndWith("task:overstory-abc");
+	});
+
+	test("includes ISO timestamp in header", () => {
+		const beacon = buildBeacon(makeBeaconOpts());
+		const firstLine = beacon.split("\n")[0] ?? "";
+
+		// ISO timestamp pattern: YYYY-MM-DDTHH:MM:SS.sssZ
+		expect(firstLine).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+	});
+
+	test("includes depth and parent info", () => {
+		const beacon = buildBeacon(makeBeaconOpts({ depth: 1, parentAgent: "lead-alpha" }));
+		const lines = beacon.split("\n");
+
+		expect(lines[1]).toBe("Depth: 1 | Parent: lead-alpha");
+	});
+
+	test("shows 'none' for parent when no parent agent", () => {
+		const beacon = buildBeacon(makeBeaconOpts({ parentAgent: null }));
+		const lines = beacon.split("\n");
+
+		expect(lines[1]).toBe("Depth: 0 | Parent: none");
+	});
+
+	test("includes all four numbered startup protocol steps", () => {
+		const opts = makeBeaconOpts({ agentName: "scout-1", taskId: "overstory-xyz" });
+		const beacon = buildBeacon(opts);
+
+		expect(beacon).toContain("1. Read your assignment in .claude/CLAUDE.md");
+		expect(beacon).toContain("2. Load expertise: mulch prime");
+		expect(beacon).toContain("3. Check mail: overstory mail check --agent scout-1");
+		expect(beacon).toContain("4. Begin working on task overstory-xyz");
+	});
+
+	test("uses agent name in mail check command", () => {
+		const beacon = buildBeacon(makeBeaconOpts({ agentName: "reviewer-beta" }));
+
+		expect(beacon).toContain("overstory mail check --agent reviewer-beta");
+	});
+
+	test("uses task ID in final step", () => {
+		const beacon = buildBeacon(makeBeaconOpts({ taskId: "overstory-999" }));
+
+		expect(beacon).toContain("4. Begin working on task overstory-999");
+	});
+
+	test("produces exactly 7 lines", () => {
+		const beacon = buildBeacon(makeBeaconOpts());
+		const lines = beacon.split("\n");
+
+		expect(lines).toHaveLength(7);
+	});
+
+	test("reflects capability in header", () => {
+		const beacon = buildBeacon(makeBeaconOpts({ capability: "scout" }));
+		const firstLine = beacon.split("\n")[0] ?? "";
+
+		expect(firstLine).toContain("(scout)");
+	});
+
+	test("works with hierarchy depth > 0 and parent", () => {
+		const beacon = buildBeacon(
+			makeBeaconOpts({
+				agentName: "worker-3",
+				capability: "builder",
+				taskId: "overstory-deep",
+				parentAgent: "lead-main",
+				depth: 2,
+			}),
+		);
+		const lines = beacon.split("\n");
+
+		expect(lines[0]).toContain("[OVERSTORY] worker-3 (builder)");
+		expect(lines[0]).toContain("task:overstory-deep");
+		expect(lines[1]).toBe("Depth: 2 | Parent: lead-main");
 	});
 });
