@@ -163,8 +163,8 @@ describe("deployHooks", () => {
 		const content = await Bun.file(outputPath).text();
 		const parsed = JSON.parse(content);
 		const sessionStart = parsed.hooks.SessionStart[0];
-		expect(sessionStart.type).toBe("command");
-		expect(sessionStart.command).toBe("overstory prime --agent prime-agent");
+		expect(sessionStart.hooks[0].type).toBe("command");
+		expect(sessionStart.hooks[0].command).toBe("overstory prime --agent prime-agent");
 	});
 
 	test("UserPromptSubmit hook runs mail check with agent name", async () => {
@@ -188,8 +188,8 @@ describe("deployHooks", () => {
 		const content = await Bun.file(outputPath).text();
 		const parsed = JSON.parse(content);
 		const preCompact = parsed.hooks.PreCompact[0];
-		expect(preCompact.type).toBe("command");
-		expect(preCompact.command).toBe("overstory prime --agent compact-agent --compact");
+		expect(preCompact.hooks[0].type).toBe("command");
+		expect(preCompact.hooks[0].command).toBe("overstory prime --agent compact-agent --compact");
 	});
 
 	test("creates .claude directory even if worktree already exists", async () => {

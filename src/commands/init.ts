@@ -235,13 +235,18 @@ async function buildHooksJson(overstoryRoot: string): Promise<string> {
 		return await templateFile.text();
 	}
 
-	// Generate default hooks config
+	// Generate default hooks config — all hook types require {matcher, hooks} wrapper
 	const hooks = {
 		hooks: {
 			SessionStart: [
 				{
-					type: "command",
-					command: "overstory prime",
+					matcher: "",
+					hooks: [
+						{
+							type: "command",
+							command: "overstory prime",
+						},
+					],
 				},
 			],
 			UserPromptSubmit: [
@@ -279,14 +284,24 @@ async function buildHooksJson(overstoryRoot: string): Promise<string> {
 			],
 			Stop: [
 				{
-					type: "command",
-					command: "overstory log session-end",
+					matcher: "",
+					hooks: [
+						{
+							type: "command",
+							command: "overstory log session-end",
+						},
+					],
 				},
 			],
 			PreCompact: [
 				{
-					type: "command",
-					command: "overstory prime --compact",
+					matcher: "",
+					hooks: [
+						{
+							type: "command",
+							command: "overstory prime --compact",
+						},
+					],
 				},
 			],
 		},

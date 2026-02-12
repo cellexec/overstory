@@ -2,8 +2,13 @@
   "hooks": {
     "SessionStart": [
       {
-        "type": "command",
-        "command": "overstory prime --agent {{AGENT_NAME}}"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "overstory prime --agent {{AGENT_NAME}}"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -41,14 +46,24 @@
     ],
     "Stop": [
       {
-        "type": "command",
-        "command": "overstory log session-end --agent {{AGENT_NAME}}"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "overstory log session-end --agent {{AGENT_NAME}}"
+          }
+        ]
       }
     ],
     "PreCompact": [
       {
-        "type": "command",
-        "command": "overstory prime --agent {{AGENT_NAME}} --compact"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "overstory prime --agent {{AGENT_NAME}} --compact"
+          }
+        ]
       }
     ]
   }
