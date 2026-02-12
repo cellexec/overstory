@@ -10,7 +10,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { DEFAULT_CONFIG } from "../config.ts";
 import { ValidationError } from "../errors.ts";
@@ -490,6 +490,7 @@ export async function initCommand(args: string[]): Promise<void> {
 	const dirs = [
 		OVERSTORY_DIR,
 		join(OVERSTORY_DIR, "agents"),
+		join(OVERSTORY_DIR, "agent-defs"),
 		join(OVERSTORY_DIR, "worktrees"),
 		join(OVERSTORY_DIR, "specs"),
 		join(OVERSTORY_DIR, "logs"),
@@ -498,6 +499,18 @@ export async function initCommand(args: string[]): Promise<void> {
 	for (const dir of dirs) {
 		await mkdir(join(projectRoot, dir), { recursive: true });
 		printCreated(`${dir}/`);
+	}
+
+	// 3b. Deploy agent definition .md files from overstory install directory
+	const overstoryAgentsDir = join(import.meta.dir, "..", "..", "agents");
+	const agentDefsTarget = join(overstoryPath, "agent-defs");
+	const agentDefFiles = await readdir(overstoryAgentsDir);
+	for (const fileName of agentDefFiles) {
+		if (!fileName.endsWith(".md")) continue;
+		const source = Bun.file(join(overstoryAgentsDir, fileName));
+		const content = await source.text();
+		await Bun.write(join(agentDefsTarget, fileName), content);
+		printCreated(`${OVERSTORY_DIR}/agent-defs/${fileName}`);
 	}
 
 	// 4. Write config.yaml
