@@ -5,6 +5,21 @@ import { join } from "node:path";
 import type { OverlayConfig } from "../types.ts";
 import { generateOverlay, writeOverlay } from "./overlay.ts";
 
+const SAMPLE_BASE_DEFINITION = `# Builder Agent
+
+You are a **builder agent** in the overstory swarm system.
+
+## Role
+Implement changes according to a spec.
+
+## Propulsion Principle
+Read your assignment. Execute immediately.
+
+## Failure Modes
+- FILE_SCOPE_VIOLATION
+- SILENT_FAILURE
+`;
+
 /** Build a complete OverlayConfig with sensible defaults, overrideable by partial. */
 function makeConfig(overrides?: Partial<OverlayConfig>): OverlayConfig {
 	return {
@@ -18,6 +33,7 @@ function makeConfig(overrides?: Partial<OverlayConfig>): OverlayConfig {
 		depth: 1,
 		canSpawn: false,
 		capability: "builder",
+		baseDefinition: SAMPLE_BASE_DEFINITION,
 		...overrides,
 	};
 }
@@ -234,6 +250,26 @@ describe("generateOverlay", () => {
 
 		expect(output).toContain("overstory mail check --agent worker-42");
 		expect(output).toContain("overstory mail send --to");
+	});
+
+	test("output includes base agent definition content (Layer 1)", async () => {
+		const config = makeConfig();
+		const output = await generateOverlay(config);
+
+		expect(output).toContain("# Builder Agent");
+		expect(output).toContain("Propulsion Principle");
+		expect(output).toContain("FILE_SCOPE_VIOLATION");
+	});
+
+	test("base definition appears before task assignment section", async () => {
+		const config = makeConfig();
+		const output = await generateOverlay(config);
+
+		const baseDefIndex = output.indexOf("# Builder Agent");
+		const assignmentIndex = output.indexOf("## Your Assignment");
+		expect(baseDefIndex).toBeGreaterThan(-1);
+		expect(assignmentIndex).toBeGreaterThan(-1);
+		expect(baseDefIndex).toBeLessThan(assignmentIndex);
 	});
 });
 

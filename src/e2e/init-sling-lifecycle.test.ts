@@ -160,6 +160,9 @@ describe("E2E: init→sling lifecycle on external project", () => {
 	test("overlay generation works for external project", async () => {
 		await initCommand([]);
 
+		const agentDefsDir = join(tempDir, ".overstory", "agent-defs");
+		const baseDefinition = await Bun.file(join(agentDefsDir, "builder.md")).text();
+
 		const overlayConfig: OverlayConfig = {
 			agentName: "test-agent",
 			beadId: "test-bead-001",
@@ -171,6 +174,7 @@ describe("E2E: init→sling lifecycle on external project", () => {
 			depth: 0,
 			canSpawn: false,
 			capability: "builder",
+			baseDefinition,
 		};
 
 		// Write the overlay into a subdirectory of the temp dir (simulating a worktree)
@@ -224,6 +228,7 @@ describe("E2E: init→sling lifecycle on external project", () => {
 		expect(lead?.canSpawn).toBe(true);
 
 		// Step 4: Generate overlay using a realistic config
+		const builderDef = await Bun.file(join(agentDefsDir, "builder.md")).text();
 		const overlayConfig: OverlayConfig = {
 			agentName: "lifecycle-builder",
 			beadId: "lifecycle-001",
@@ -235,6 +240,7 @@ describe("E2E: init→sling lifecycle on external project", () => {
 			depth: 0,
 			canSpawn: false,
 			capability: "builder",
+			baseDefinition: builderDef,
 		};
 
 		const worktreePath = join(tempDir, ".overstory", "worktrees", "lifecycle-builder");

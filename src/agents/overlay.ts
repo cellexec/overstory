@@ -166,6 +166,7 @@ export async function generateOverlay(config: OverlayConfig): Promise<string> {
 		"{{QUALITY_GATES}}": formatQualityGates(config),
 		"{{CONSTRAINTS}}": formatConstraints(config),
 		"{{SPEC_INSTRUCTION}}": specInstruction,
+		"{{BASE_DEFINITION}}": config.baseDefinition,
 	};
 
 	let result = template;

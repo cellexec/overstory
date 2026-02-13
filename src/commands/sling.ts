@@ -343,6 +343,9 @@ export async function slingCommand(args: string[]): Promise<void> {
 	});
 
 	// 7. Generate + write overlay CLAUDE.md
+	const agentDefPath = join(config.project.root, config.agents.baseDir, agentDef.file);
+	const baseDefinition = await Bun.file(agentDefPath).text();
+
 	const overlayConfig: OverlayConfig = {
 		agentName: name,
 		beadId: taskId,
@@ -354,6 +357,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 		depth,
 		canSpawn: agentDef.canSpawn,
 		capability,
+		baseDefinition,
 	};
 
 	await writeOverlay(worktreePath, overlayConfig);

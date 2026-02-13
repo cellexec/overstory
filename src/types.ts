@@ -247,6 +247,8 @@ export interface OverlayConfig {
 	depth: number;
 	canSpawn: boolean;
 	capability: string;
+	/** Full content of the base agent definition file (Layer 1: role-specific HOW). */
+	baseDefinition: string;
 }
 
 // === Merge Queue ===
