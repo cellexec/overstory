@@ -12,6 +12,7 @@
  */
 
 import { MergeError } from "../errors.ts";
+import type { MulchClient } from "../mulch/client.ts";
 import type { MergeEntry, MergeResult, ResolutionTier } from "../types.ts";
 
 export interface MergeResolver {
@@ -333,14 +334,47 @@ async function tryReimagine(
 }
 
 /**
+ * Record a merge conflict pattern to mulch for future learning.
+ * Uses fire-and-forget (try/catch swallowing errors) so recording
+ * never blocks or fails the merge itself.
+ */
+function recordConflictPattern(
+	mulchClient: MulchClient,
+	entry: MergeEntry,
+	tier: ResolutionTier,
+	conflictFiles: string[],
+	success: boolean,
+): void {
+	const outcome = success ? "resolved" : "failed";
+	const description = [
+		`Merge conflict ${outcome} at tier ${tier}.`,
+		`Branch: ${entry.branchName}.`,
+		`Agent: ${entry.agentName}.`,
+		`Conflicting files: ${conflictFiles.join(", ")}.`,
+	].join(" ");
+
+	// Fire-and-forget per convention mx-09e10f
+	mulchClient
+		.record("architecture", {
+			type: "pattern",
+			description,
+			tags: ["merge-conflict"],
+			evidenceBead: entry.beadId,
+		})
+		.catch(() => {});
+}
+
+/**
  * Create a MergeResolver with configurable tier enablement.
  *
  * @param options.aiResolveEnabled - Enable tier 3 (AI-assisted resolution)
  * @param options.reimagineEnabled - Enable tier 4 (full reimagine)
+ * @param options.mulchClient - Optional MulchClient for conflict pattern recording
  */
 export function createMergeResolver(options: {
 	aiResolveEnabled: boolean;
 	reimagineEnabled: boolean;
+	mulchClient?: MulchClient;
 }): MergeResolver {
 	return {
 		async resolve(
@@ -389,6 +423,9 @@ export function createMergeResolver(options: {
 			lastTier = "auto-resolve";
 			const autoResult = await tryAutoResolve(conflictFiles, repoRoot);
 			if (autoResult.success) {
+				if (options.mulchClient) {
+					recordConflictPattern(options.mulchClient, entry, "auto-resolve", conflictFiles, true);
+				}
 				return {
 					entry: { ...entry, status: "merged", resolvedTier: "auto-resolve" },
 					success: true,
@@ -404,6 +441,9 @@ export function createMergeResolver(options: {
 				lastTier = "ai-resolve";
 				const aiResult = await tryAiResolve(conflictFiles, repoRoot);
 				if (aiResult.success) {
+					if (options.mulchClient) {
+						recordConflictPattern(options.mulchClient, entry, "ai-resolve", conflictFiles, true);
+					}
 					return {
 						entry: { ...entry, status: "merged", resolvedTier: "ai-resolve" },
 						success: true,
@@ -420,6 +460,9 @@ export function createMergeResolver(options: {
 				lastTier = "reimagine";
 				const reimagineResult = await tryReimagine(entry, canonicalBranch, repoRoot);
 				if (reimagineResult.success) {
+					if (options.mulchClient) {
+						recordConflictPattern(options.mulchClient, entry, "reimagine", conflictFiles, true);
+					}
 					return {
 						entry: { ...entry, status: "merged", resolvedTier: "reimagine" },
 						success: true,
@@ -435,6 +478,10 @@ export function createMergeResolver(options: {
 				await runGit(repoRoot, ["merge", "--abort"]);
 			} catch {
 				// merge --abort may fail if there's no merge in progress (e.g., after reimagine)
+			}
+
+			if (options.mulchClient) {
+				recordConflictPattern(options.mulchClient, entry, lastTier, conflictFiles, false);
 			}
 
 			return {

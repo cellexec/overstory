@@ -10,6 +10,7 @@ import {
 } from "bun:test";
 import { join } from "node:path";
 import { MergeError } from "../errors.ts";
+import type { MulchClient } from "../mulch/client.ts";
 import {
 	cleanupTempDir,
 	commitFile,
@@ -113,6 +114,90 @@ async function setupReimagineScenario(dir: string, baseBranch: string): Promise<
 	await runGitInDir(dir, ["checkout", baseBranch]);
 	await runGitInDir(dir, ["rm", "src/conflict-file.ts"]);
 	await runGitInDir(dir, ["commit", "-m", "delete conflict file"]);
+}
+
+/**
+ * Create a mock MulchClient for testing.
+ * Optionally override the record method to track calls or simulate failures.
+ */
+function createMockMulchClient(
+	recordImpl?: (domain: string, options: unknown) => Promise<void>,
+): MulchClient {
+	return {
+		async prime() {
+			return "";
+		},
+		async status() {
+			return { domains: [] };
+		},
+		async record(domain: string, options: unknown) {
+			if (recordImpl) {
+				return recordImpl(domain, options);
+			}
+		},
+		async query() {
+			return "";
+		},
+		async search() {
+			return "";
+		},
+		async diff() {
+			return {
+				success: true,
+				command: "diff",
+				since: "HEAD",
+				domains: [],
+				message: "",
+			};
+		},
+		async learn() {
+			return {
+				success: true,
+				command: "learn",
+				changedFiles: [],
+				suggestedDomains: [],
+				unmatchedFiles: [],
+			};
+		},
+		async prune() {
+			return {
+				success: true,
+				command: "prune",
+				dryRun: false,
+				totalPruned: 0,
+				results: [],
+			};
+		},
+		async doctor() {
+			return {
+				success: true,
+				command: "doctor",
+				checks: [],
+				summary: {
+					pass: 0,
+					warn: 0,
+					fail: 0,
+					totalIssues: 0,
+					fixableIssues: 0,
+				},
+			};
+		},
+		async ready() {
+			return {
+				success: true,
+				command: "ready",
+				count: 0,
+				entries: [],
+			};
+		},
+		async compact() {
+			return {
+				success: true,
+				command: "compact",
+				action: "analyze",
+			};
+		},
+	};
 }
 
 describe("createMergeResolver", () => {
@@ -613,6 +698,381 @@ describe("createMergeResolver", () => {
 				} finally {
 					spawnSpy.mockRestore();
 				}
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+	});
+
+	describe("Conflict pattern recording", () => {
+		test("no recording when mulchClient is not provided (backward compatible)", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupContentConflict(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					filesModified: ["src/test.ts"],
+				});
+
+				// No mulchClient passed — should work as before
+				const resolver = createMergeResolver({
+					aiResolveEnabled: false,
+					reimagineEnabled: false,
+				});
+
+				const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+				expect(result.success).toBe(true);
+				expect(result.tier).toBe("auto-resolve");
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+
+		test("records pattern on tier 2 auto-resolve success", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupContentConflict(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					beadId: "bead-abc-123",
+					agentName: "test-builder",
+					filesModified: ["src/test.ts"],
+				});
+
+				// Create a mock MulchClient with a spy on record
+				const recordCalls: Array<{
+					domain: string;
+					options: {
+						type: string;
+						description?: string;
+						tags?: string[];
+						evidenceBead?: string;
+					};
+				}> = [];
+
+				const mockMulchClient = createMockMulchClient(async (domain, options) => {
+					recordCalls.push({
+						domain,
+						options: options as {
+							type: string;
+							description?: string;
+							tags?: string[];
+							evidenceBead?: string;
+						},
+					});
+				});
+
+				const resolver = createMergeResolver({
+					aiResolveEnabled: false,
+					reimagineEnabled: false,
+					mulchClient: mockMulchClient,
+				});
+
+				const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+				expect(result.success).toBe(true);
+				expect(result.tier).toBe("auto-resolve");
+
+				// Verify record was called
+				expect(recordCalls.length).toBe(1);
+				const call = recordCalls[0];
+				expect(call?.domain).toBe("architecture");
+				expect(call?.options.type).toBe("pattern");
+				expect(call?.options.tags).toContain("merge-conflict");
+				expect(call?.options.evidenceBead).toBe("bead-abc-123");
+
+				// Verify description contains key details
+				const desc = call?.options.description ?? "";
+				expect(desc).toContain("resolved");
+				expect(desc).toContain("auto-resolve");
+				expect(desc).toContain("feature-branch");
+				expect(desc).toContain("test-builder");
+				expect(desc).toContain("src/test.ts");
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+
+		test("records pattern on total failure", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupDeleteModifyConflict(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					beadId: "bead-fail-456",
+					agentName: "test-agent",
+					filesModified: ["src/test.ts"],
+				});
+
+				const recordCalls: Array<{
+					domain: string;
+					options: {
+						type: string;
+						description?: string;
+						tags?: string[];
+						evidenceBead?: string;
+					};
+				}> = [];
+
+				const mockMulchClient = createMockMulchClient(async (domain, options) => {
+					recordCalls.push({
+						domain,
+						options: options as {
+							type: string;
+							description?: string;
+							tags?: string[];
+							evidenceBead?: string;
+						},
+					});
+				});
+
+				// AI and reimagine disabled — will fail at tier 2
+				const resolver = createMergeResolver({
+					aiResolveEnabled: false,
+					reimagineEnabled: false,
+					mulchClient: mockMulchClient,
+				});
+
+				const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+				expect(result.success).toBe(false);
+
+				// Verify record was called for failure
+				expect(recordCalls.length).toBe(1);
+				const call = recordCalls[0];
+				expect(call?.domain).toBe("architecture");
+				expect(call?.options.type).toBe("pattern");
+				expect(call?.options.evidenceBead).toBe("bead-fail-456");
+
+				// Verify description contains "failed" not "resolved"
+				const desc = call?.options.description ?? "";
+				expect(desc).toContain("failed");
+				expect(desc).not.toContain("resolved");
+				expect(desc).toContain("auto-resolve"); // last attempted tier
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+
+		test("recording failure does not affect merge result (fire-and-forget)", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupContentConflict(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					filesModified: ["src/test.ts"],
+				});
+
+				// Mock mulchClient whose record rejects
+				const mockMulchClient = createMockMulchClient(async () => {
+					throw new Error("Mulch recording failed!");
+				});
+
+				const resolver = createMergeResolver({
+					aiResolveEnabled: false,
+					reimagineEnabled: false,
+					mulchClient: mockMulchClient,
+				});
+
+				// Should still succeed despite recording failure (fire-and-forget)
+				const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+				expect(result.success).toBe(true);
+				expect(result.tier).toBe("auto-resolve");
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+
+		test("records pattern on tier 3 ai-resolve success", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupDeleteModifyConflict(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					beadId: "bead-ai-789",
+					filesModified: ["src/test.ts"],
+				});
+
+				const recordCalls: Array<{
+					domain: string;
+					options: {
+						type: string;
+						description?: string;
+						tags?: string[];
+						evidenceBead?: string;
+					};
+				}> = [];
+
+				const mockMulchClient = createMockMulchClient(async (domain, options) => {
+					recordCalls.push({
+						domain,
+						options: options as {
+							type: string;
+							description?: string;
+							tags?: string[];
+							evidenceBead?: string;
+						},
+					});
+				});
+
+				// Mock claude to succeed
+				const originalSpawn = Bun.spawn;
+				const selectiveMock = (...args: unknown[]): unknown => {
+					const cmd = args[0] as string[];
+					if (cmd?.[0] === "claude") {
+						return mockSpawnResult("resolved content from AI\n", "", 0);
+					}
+					return originalSpawn.apply(Bun, args as Parameters<typeof Bun.spawn>);
+				};
+
+				const spawnSpy = spyOn(Bun, "spawn").mockImplementation(selectiveMock as typeof Bun.spawn);
+
+				try {
+					const resolver = createMergeResolver({
+						aiResolveEnabled: true,
+						reimagineEnabled: false,
+						mulchClient: mockMulchClient,
+					});
+
+					const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+					expect(result.success).toBe(true);
+					expect(result.tier).toBe("ai-resolve");
+
+					// Verify record was called
+					expect(recordCalls.length).toBe(1);
+					const call = recordCalls[0];
+					expect(call?.domain).toBe("architecture");
+					expect(call?.options.evidenceBead).toBe("bead-ai-789");
+
+					const desc = call?.options.description ?? "";
+					expect(desc).toContain("resolved");
+					expect(desc).toContain("ai-resolve");
+				} finally {
+					spawnSpy.mockRestore();
+				}
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+
+		test("records pattern on tier 4 reimagine success", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupReimagineScenario(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					beadId: "bead-reimagine-xyz",
+					filesModified: ["src/reimagine-target.ts"],
+				});
+
+				const recordCalls: Array<{
+					domain: string;
+					options: {
+						type: string;
+						description?: string;
+						tags?: string[];
+						evidenceBead?: string;
+					};
+				}> = [];
+
+				const mockMulchClient = createMockMulchClient(async (domain, options) => {
+					recordCalls.push({
+						domain,
+						options: options as {
+							type: string;
+							description?: string;
+							tags?: string[];
+							evidenceBead?: string;
+						},
+					});
+				});
+
+				// Mock claude to succeed
+				const originalSpawn = Bun.spawn;
+				const selectiveMock = (...args: unknown[]): unknown => {
+					const cmd = args[0] as string[];
+					if (cmd?.[0] === "claude") {
+						return mockSpawnResult("reimagined content\n", "", 0);
+					}
+					return originalSpawn.apply(Bun, args as Parameters<typeof Bun.spawn>);
+				};
+
+				const spawnSpy = spyOn(Bun, "spawn").mockImplementation(selectiveMock as typeof Bun.spawn);
+
+				try {
+					const resolver = createMergeResolver({
+						aiResolveEnabled: false,
+						reimagineEnabled: true,
+						mulchClient: mockMulchClient,
+					});
+
+					const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+					expect(result.success).toBe(true);
+					expect(result.tier).toBe("reimagine");
+
+					// Verify record was called
+					expect(recordCalls.length).toBe(1);
+					const call = recordCalls[0];
+					expect(call?.domain).toBe("architecture");
+					expect(call?.options.evidenceBead).toBe("bead-reimagine-xyz");
+
+					const desc = call?.options.description ?? "";
+					expect(desc).toContain("resolved");
+					expect(desc).toContain("reimagine");
+				} finally {
+					spawnSpy.mockRestore();
+				}
+			} finally {
+				await cleanupTempDir(repoDir);
+			}
+		});
+
+		test("no recording on tier 1 clean merge (no conflict)", async () => {
+			const repoDir = await createTempGitRepo();
+			try {
+				const defaultBranch = await getDefaultBranch(repoDir);
+				await setupCleanMerge(repoDir, defaultBranch);
+
+				const entry = makeTestEntry({
+					branchName: "feature-branch",
+					filesModified: ["src/feature-file.ts"],
+				});
+
+				const recordCalls: Array<unknown> = [];
+
+				const mockMulchClient = createMockMulchClient(async (domain, options) => {
+					recordCalls.push({ domain, options });
+				});
+
+				const resolver = createMergeResolver({
+					aiResolveEnabled: false,
+					reimagineEnabled: false,
+					mulchClient: mockMulchClient,
+				});
+
+				const result = await resolver.resolve(entry, defaultBranch, repoDir);
+
+				expect(result.success).toBe(true);
+				expect(result.tier).toBe("clean-merge");
+
+				// No recording on clean merge (no conflict occurred)
+				expect(recordCalls.length).toBe(0);
 			} finally {
 				await cleanupTempDir(repoDir);
 			}
