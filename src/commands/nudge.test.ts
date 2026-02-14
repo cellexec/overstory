@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createSessionStore } from "../sessions/store.ts";
 import type { AgentSession } from "../types.ts";
 
 /**
@@ -23,13 +25,17 @@ afterEach(async () => {
 });
 
 /**
- * Helper to write a sessions.json for testing.
+ * Helper to write sessions to SessionStore (sessions.db) for testing.
  */
-async function writeSessions(projectRoot: string, sessions: AgentSession[]): Promise<void> {
+function writeSessionsToStore(projectRoot: string, sessions: AgentSession[]): void {
 	const dir = join(projectRoot, ".overstory");
-	const { mkdir } = await import("node:fs/promises");
-	await mkdir(dir, { recursive: true });
-	await Bun.write(join(dir, "sessions.json"), `${JSON.stringify(sessions, null, "\t")}\n`);
+	mkdirSync(dir, { recursive: true });
+	const dbPath = join(dir, "sessions.db");
+	const store = createSessionStore(dbPath);
+	for (const session of sessions) {
+		store.upsert(session);
+	}
+	store.close();
 }
 
 function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
@@ -61,7 +67,7 @@ describe("nudgeAgent", () => {
 	}
 
 	test("returns error when no active session exists", async () => {
-		await writeSessions(tempDir, []);
+		writeSessionsToStore(tempDir, []);
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "nonexistent-agent");
 		expect(result.delivered).toBe(false);
@@ -69,7 +75,7 @@ describe("nudgeAgent", () => {
 	});
 
 	test("returns error when agent is zombie", async () => {
-		await writeSessions(tempDir, [makeSession({ state: "zombie" })]);
+		writeSessionsToStore(tempDir, [makeSession({ state: "zombie" })]);
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "test-agent");
 		expect(result.delivered).toBe(false);
@@ -77,7 +83,7 @@ describe("nudgeAgent", () => {
 	});
 
 	test("returns error when agent is completed", async () => {
-		await writeSessions(tempDir, [makeSession({ state: "completed" })]);
+		writeSessionsToStore(tempDir, [makeSession({ state: "completed" })]);
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "test-agent");
 		expect(result.delivered).toBe(false);
@@ -85,7 +91,7 @@ describe("nudgeAgent", () => {
 	});
 
 	test("finds active agent in working state", async () => {
-		await writeSessions(tempDir, [makeSession({ state: "working" })]);
+		writeSessionsToStore(tempDir, [makeSession({ state: "working" })]);
 		const { nudgeAgent } = await importNudge();
 		// This will fail on sendKeys (no real tmux) but should get past session lookup
 		const result = await nudgeAgent(tempDir, "test-agent");
@@ -95,15 +101,16 @@ describe("nudgeAgent", () => {
 	});
 
 	test("finds active agent in booting state", async () => {
-		await writeSessions(tempDir, [makeSession({ state: "booting" })]);
+		writeSessionsToStore(tempDir, [makeSession({ state: "booting" })]);
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "test-agent");
 		expect(result.delivered).toBe(false);
 		expect(result.reason).toContain("not alive");
 	});
 
-	test("handles missing sessions.json gracefully", async () => {
-		// No sessions.json at all
+	test("handles missing sessions.db gracefully", async () => {
+		// Create .overstory dir but no sessions.db — SessionStore will be created empty
+		mkdirSync(join(tempDir, ".overstory"), { recursive: true });
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "test-agent");
 		expect(result.delivered).toBe(false);
@@ -111,7 +118,7 @@ describe("nudgeAgent", () => {
 	});
 
 	test("resolves orchestrator from orchestrator-tmux.json fallback", async () => {
-		// No sessions.json, but orchestrator-tmux.json exists
+		// No sessions.db, but orchestrator-tmux.json exists
 		const { mkdir } = await import("node:fs/promises");
 		await mkdir(join(tempDir, ".overstory"), { recursive: true });
 		await Bun.write(
@@ -129,16 +136,16 @@ describe("nudgeAgent", () => {
 	test("returns error when orchestrator has no tmux registration", async () => {
 		const { mkdir } = await import("node:fs/promises");
 		await mkdir(join(tempDir, ".overstory"), { recursive: true });
-		// No orchestrator-tmux.json and no sessions.json entry
+		// No orchestrator-tmux.json and no sessions.db entry
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "orchestrator");
 		expect(result.delivered).toBe(false);
 		expect(result.reason).toContain("No active session");
 	});
 
-	test("prefers sessions.json over orchestrator-tmux.json for orchestrator", async () => {
-		// If orchestrator somehow appears in sessions.json, use that
-		await writeSessions(tempDir, [
+	test("prefers sessions.db over orchestrator-tmux.json for orchestrator", async () => {
+		// If orchestrator somehow appears in sessions.db, use that
+		writeSessionsToStore(tempDir, [
 			makeSession({
 				agentName: "orchestrator",
 				tmuxSession: "overstory-orchestrator",
@@ -152,7 +159,7 @@ describe("nudgeAgent", () => {
 
 		const { nudgeAgent } = await importNudge();
 		const result = await nudgeAgent(tempDir, "orchestrator");
-		// Should use sessions.json entry, fail at tmux alive check
+		// Should use sessions.db entry, fail at tmux alive check
 		expect(result.delivered).toBe(false);
 		expect(result.reason).toContain("overstory-orchestrator");
 	});

@@ -13,7 +13,6 @@ import { createMailClient } from "../mail/client.ts";
 import { createMailStore } from "../mail/store.ts";
 import { MAIL_MESSAGE_TYPES } from "../types.ts";
 import type { MailMessage, MailMessageType } from "../types.ts";
-import { nudgeAgent } from "./nudge.ts";
 
 /**
  * Protocol message types that require immediate recipient attention.
@@ -100,6 +99,83 @@ function openStore(cwd: string) {
 	return createMailStore(dbPath);
 }
 
+// === Pending Nudge Markers ===
+//
+// Instead of sending tmux keys (which corrupt tool I/O), auto-nudge writes
+// a JSON marker file per agent. The `mail check --inject` flow reads and
+// clears these markers, prepending a priority banner to the injected output.
+
+/** Directory where pending nudge markers are stored. */
+function pendingNudgeDir(cwd: string): string {
+	return join(cwd, ".overstory", "pending-nudges");
+}
+
+/** Shape of a pending nudge marker file. */
+interface PendingNudge {
+	from: string;
+	reason: string;
+	subject: string;
+	messageId: string;
+	createdAt: string;
+}
+
+/**
+ * Write a pending nudge marker for an agent.
+ *
+ * Creates `.overstory/pending-nudges/{agent}.json` so that the next
+ * `mail check --inject` call surfaces a priority banner for this message.
+ * Overwrites any existing marker (only the latest nudge matters).
+ */
+async function writePendingNudge(
+	cwd: string,
+	agentName: string,
+	nudge: Omit<PendingNudge, "createdAt">,
+): Promise<void> {
+	const dir = pendingNudgeDir(cwd);
+	const { mkdir } = await import("node:fs/promises");
+	await mkdir(dir, { recursive: true });
+
+	const marker: PendingNudge = {
+		...nudge,
+		createdAt: new Date().toISOString(),
+	};
+	const filePath = join(dir, `${agentName}.json`);
+	await Bun.write(filePath, `${JSON.stringify(marker, null, "\t")}\n`);
+}
+
+/**
+ * Read and clear pending nudge markers for an agent.
+ *
+ * Returns the pending nudge (if any) and removes the marker file.
+ * Called by `mail check --inject` to prepend a priority banner.
+ */
+async function readAndClearPendingNudge(
+	cwd: string,
+	agentName: string,
+): Promise<PendingNudge | null> {
+	const filePath = join(pendingNudgeDir(cwd), `${agentName}.json`);
+	const file = Bun.file(filePath);
+	if (!(await file.exists())) {
+		return null;
+	}
+	try {
+		const text = await file.text();
+		const nudge = JSON.parse(text) as PendingNudge;
+		const { unlink } = await import("node:fs/promises");
+		await unlink(filePath);
+		return nudge;
+	} catch {
+		// Corrupt or race condition — clear it and move on
+		try {
+			const { unlink } = await import("node:fs/promises");
+			await unlink(filePath);
+		} catch {
+			// Already gone
+		}
+		return null;
+	}
+}
+
 /**
  * Open a mail client connected to the project's mail.db.
  * The cwd must already be resolved to the canonical project root.
@@ -172,17 +248,25 @@ async function handleSend(args: string[], cwd: string): Promise<void> {
 			process.stdout.write(`✉️  Sent message ${id} to ${to}\n`);
 		}
 
-		// Auto-nudge for urgent/high priority OR actionable protocol types
+		// Auto-nudge: write a pending nudge marker instead of sending tmux keys.
+		// Direct tmux sendKeys during tool execution corrupts the agent's I/O,
+		// causing SIGKILL (exit 137) and "request interrupted" errors (overstory-ii1o).
+		// The message is already in the DB — the UserPromptSubmit hook's
+		// `mail check --inject` will surface it on the next prompt cycle.
+		// The pending nudge marker ensures the message gets a priority banner.
 		const shouldNudge = priority === "urgent" || priority === "high" || AUTO_NUDGE_TYPES.has(type);
 		if (shouldNudge) {
 			const nudgeReason = AUTO_NUDGE_TYPES.has(type) ? type : `${priority} priority`;
-			const result = await nudgeAgent(
-				cwd,
-				to,
-				`[NUDGE from ${from}] New ${nudgeReason} mail: ${subject}`,
-			);
-			if (result.delivered && !hasFlag(args, "--json")) {
-				process.stdout.write(`📢 Auto-nudged "${to}" (${nudgeReason})\n`);
+			await writePendingNudge(cwd, to, {
+				from,
+				reason: nudgeReason,
+				subject,
+				messageId: id,
+			});
+			if (!hasFlag(args, "--json")) {
+				process.stdout.write(
+					`📢 Queued nudge for "${to}" (${nudgeReason}, delivered on next prompt)\n`,
+				);
 			}
 		}
 	} finally {
@@ -191,7 +275,7 @@ async function handleSend(args: string[], cwd: string): Promise<void> {
 }
 
 /** overstory mail check */
-function handleCheck(args: string[], cwd: string): void {
+async function handleCheck(args: string[], cwd: string): Promise<void> {
 	const agent = getFlag(args, "--agent") ?? "orchestrator";
 	const inject = hasFlag(args, "--inject");
 	const json = hasFlag(args, "--json");
@@ -199,7 +283,16 @@ function handleCheck(args: string[], cwd: string): void {
 	const client = openClient(cwd);
 	try {
 		if (inject) {
+			// Check for pending nudge markers (written by auto-nudge instead of tmux keys)
+			const pendingNudge = await readAndClearPendingNudge(cwd, agent);
 			const output = client.checkInject(agent);
+
+			// Prepend a priority banner if there's a pending nudge
+			if (pendingNudge) {
+				const banner = `🚨 PRIORITY: ${pendingNudge.reason} message from ${pendingNudge.from} — "${pendingNudge.subject}"\n\n`;
+				process.stdout.write(banner);
+			}
+
 			if (output.length > 0) {
 				process.stdout.write(output);
 			}
@@ -397,7 +490,7 @@ export async function mailCommand(args: string[]): Promise<void> {
 			await handleSend(subArgs, root);
 			break;
 		case "check":
-			handleCheck(subArgs, root);
+			await handleCheck(subArgs, root);
 			break;
 		case "list":
 			handleList(subArgs, root);

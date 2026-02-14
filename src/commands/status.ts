@@ -10,6 +10,7 @@ import { loadConfig } from "../config.ts";
 import { ValidationError } from "../errors.ts";
 import { createMailStore } from "../mail/store.ts";
 import { createMetricsStore } from "../metrics/store.ts";
+import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
 import { listWorktrees } from "../worktree/manager.ts";
 import { listSessions } from "../worktree/tmux.ts";
@@ -27,23 +28,6 @@ function getFlag(args: string[], flag: string): string | undefined {
 
 function hasFlag(args: string[], flag: string): boolean {
 	return args.includes(flag);
-}
-
-/**
- * Load sessions.json from .overstory/sessions.json.
- */
-async function loadSessions(root: string): Promise<AgentSession[]> {
-	const path = join(root, ".overstory", "sessions.json");
-	const file = Bun.file(path);
-	if (!(await file.exists())) {
-		return [];
-	}
-	try {
-		const text = await file.text();
-		return JSON.parse(text) as AgentSession[];
-	} catch {
-		return [];
-	}
 }
 
 /**
@@ -88,130 +72,131 @@ export async function gatherStatus(
 	agentName = "orchestrator",
 	verbose = false,
 ): Promise<StatusData> {
-	const sessions = await loadSessions(root);
+	const overstoryDir = join(root, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
 
-	const worktrees = await listWorktrees(root);
-
-	let tmuxSessions: Array<{ name: string; pid: number }> = [];
+	let sessions: AgentSession[];
 	try {
-		tmuxSessions = await listSessions();
-	} catch {
-		// tmux might not be running
-	}
+		sessions = store.getAll();
 
-	// Reconcile agent states: if tmux session is dead but agent state
-	// indicates it should be alive, mark it as zombie
-	let sessionsUpdated = false;
-	for (const session of sessions) {
-		if (session.state === "booting" || session.state === "working" || session.state === "stalled") {
-			const tmuxAlive = tmuxSessions.some((s) => s.name === session.tmuxSession);
-			if (!tmuxAlive) {
-				session.state = "zombie";
-				sessionsUpdated = true;
-			}
-		}
-	}
+		const worktrees = await listWorktrees(root);
 
-	// Persist reconciled state so it doesn't re-appear as booting/working next time.
-	// Use write-to-tmp + rename for atomicity to avoid lost-writes from concurrent processes.
-	if (sessionsUpdated) {
+		let tmuxSessions: Array<{ name: string; pid: number }> = [];
 		try {
-			const sessionsPath = join(root, ".overstory", "sessions.json");
-			const tmpPath = `${sessionsPath}.tmp`;
-			await Bun.write(tmpPath, `${JSON.stringify(sessions, null, "\t")}\n`);
-			const { rename } = await import("node:fs/promises");
-			await rename(tmpPath, sessionsPath);
+			tmuxSessions = await listSessions();
 		} catch {
-			// Best effort: don't fail status display if write fails
+			// tmux might not be running
 		}
-	}
 
-	let unreadMailCount = 0;
-	let mailStore: ReturnType<typeof createMailStore> | null = null;
-	try {
-		const mailDbPath = join(root, ".overstory", "mail.db");
-		const mailFile = Bun.file(mailDbPath);
-		if (await mailFile.exists()) {
-			mailStore = createMailStore(mailDbPath);
-			const unread = mailStore.getAll({ to: agentName, unread: true });
-			unreadMailCount = unread.length;
-		}
-	} catch {
-		// mail db might not exist
-	}
-
-	let mergeQueueCount = 0;
-	try {
-		const queuePath = join(root, ".overstory", "merge-queue.json");
-		const queueFile = Bun.file(queuePath);
-		if (await queueFile.exists()) {
-			const text = await queueFile.text();
-			const entries = JSON.parse(text) as Array<{ status: string }>;
-			mergeQueueCount = entries.filter((e) => e.status === "pending").length;
-		}
-	} catch {
-		// queue might not exist
-	}
-
-	let recentMetricsCount = 0;
-	try {
-		const metricsDbPath = join(root, ".overstory", "metrics.db");
-		const metricsFile = Bun.file(metricsDbPath);
-		if (await metricsFile.exists()) {
-			const store = createMetricsStore(metricsDbPath);
-			recentMetricsCount = store.getRecentSessions(100).length;
-			store.close();
-		}
-	} catch {
-		// metrics db might not exist
-	}
-
-	let verboseDetails: Record<string, VerboseAgentDetail> | undefined;
-	if (verbose && sessions.length > 0) {
-		verboseDetails = {};
+		// Reconcile agent states: if tmux session is dead but agent state
+		// indicates it should be alive, mark it as zombie
 		for (const session of sessions) {
-			const logsDir = join(root, ".overstory", "logs", session.agentName);
-
-			let lastMailSent: string | null = null;
-			let lastMailReceived: string | null = null;
-			if (mailStore) {
-				try {
-					const sent = mailStore.getAll({ from: session.agentName });
-					if (sent.length > 0 && sent[0]) {
-						lastMailSent = sent[0].createdAt;
+			if (
+				session.state === "booting" ||
+				session.state === "working" ||
+				session.state === "stalled"
+			) {
+				const tmuxAlive = tmuxSessions.some((s) => s.name === session.tmuxSession);
+				if (!tmuxAlive) {
+					try {
+						store.updateState(session.agentName, "zombie");
+						session.state = "zombie";
+					} catch {
+						// Best effort: don't fail status display if update fails
 					}
-					const received = mailStore.getAll({ to: session.agentName });
-					if (received.length > 0 && received[0]) {
-						lastMailReceived = received[0].createdAt;
-					}
-				} catch {
-					// Best effort
 				}
 			}
-
-			verboseDetails[session.agentName] = {
-				worktreePath: session.worktreePath,
-				logsDir,
-				lastMailSent,
-				lastMailReceived,
-				capability: session.capability,
-			};
 		}
-	}
 
-	if (mailStore) {
-		mailStore.close();
-	}
+		let unreadMailCount = 0;
+		let mailStore: ReturnType<typeof createMailStore> | null = null;
+		try {
+			const mailDbPath = join(root, ".overstory", "mail.db");
+			const mailFile = Bun.file(mailDbPath);
+			if (await mailFile.exists()) {
+				mailStore = createMailStore(mailDbPath);
+				const unread = mailStore.getAll({ to: agentName, unread: true });
+				unreadMailCount = unread.length;
+			}
+		} catch {
+			// mail db might not exist
+		}
 
-	return {
-		agents: sessions,
-		worktrees,
-		tmuxSessions,
-		unreadMailCount,
-		mergeQueueCount,
-		recentMetricsCount,
-		verboseDetails,
-	};
+		let mergeQueueCount = 0;
+		try {
+			const queuePath = join(root, ".overstory", "merge-queue.json");
+			const queueFile = Bun.file(queuePath);
+			if (await queueFile.exists()) {
+				const text = await queueFile.text();
+				const entries = JSON.parse(text) as Array<{ status: string }>;
+				mergeQueueCount = entries.filter((e) => e.status === "pending").length;
+			}
+		} catch {
+			// queue might not exist
+		}
+
+		let recentMetricsCount = 0;
+		try {
+			const metricsDbPath = join(root, ".overstory", "metrics.db");
+			const metricsFile = Bun.file(metricsDbPath);
+			if (await metricsFile.exists()) {
+				const metricsStore = createMetricsStore(metricsDbPath);
+				recentMetricsCount = metricsStore.getRecentSessions(100).length;
+				metricsStore.close();
+			}
+		} catch {
+			// metrics db might not exist
+		}
+
+		let verboseDetails: Record<string, VerboseAgentDetail> | undefined;
+		if (verbose && sessions.length > 0) {
+			verboseDetails = {};
+			for (const session of sessions) {
+				const logsDir = join(root, ".overstory", "logs", session.agentName);
+
+				let lastMailSent: string | null = null;
+				let lastMailReceived: string | null = null;
+				if (mailStore) {
+					try {
+						const sent = mailStore.getAll({ from: session.agentName });
+						if (sent.length > 0 && sent[0]) {
+							lastMailSent = sent[0].createdAt;
+						}
+						const received = mailStore.getAll({ to: session.agentName });
+						if (received.length > 0 && received[0]) {
+							lastMailReceived = received[0].createdAt;
+						}
+					} catch {
+						// Best effort
+					}
+				}
+
+				verboseDetails[session.agentName] = {
+					worktreePath: session.worktreePath,
+					logsDir,
+					lastMailSent,
+					lastMailReceived,
+					capability: session.capability,
+				};
+			}
+		}
+
+		if (mailStore) {
+			mailStore.close();
+		}
+
+		return {
+			agents: sessions,
+			worktrees,
+			tmuxSessions,
+			unreadMailCount,
+			mergeQueueCount,
+			recentMetricsCount,
+			verboseDetails,
+		};
+	} finally {
+		store.close();
+	}
 }
 
 /**

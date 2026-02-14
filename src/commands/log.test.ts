@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
 import { createMetricsStore } from "../metrics/store.ts";
+import { createSessionStore } from "../sessions/store.ts";
 import type { AgentSession, StoredEvent } from "../types.ts";
 import { logCommand } from "./log.ts";
 
@@ -183,9 +184,9 @@ describe("logCommand", () => {
 		expect(eventsContent).toContain("tool.end");
 	});
 
-	test("session-end transitions agent state to completed in sessions.json", async () => {
-		// Create sessions.json with a test agent
-		const sessionsPath = join(tempDir, ".overstory", "sessions.json");
+	test("session-end transitions agent state to completed in sessions.db", async () => {
+		// Create sessions.db with a test agent
+		const dbPath = join(tempDir, ".overstory", "sessions.db");
 		const session: AgentSession = {
 			id: "session-001",
 			agentName: "test-agent",
@@ -204,14 +205,16 @@ describe("logCommand", () => {
 			escalationLevel: 0,
 			stalledSince: null,
 		};
-		await Bun.write(sessionsPath, `${JSON.stringify([session], null, "\t")}\n`);
+		const store = createSessionStore(dbPath);
+		store.upsert(session);
+		store.close();
 
 		await logCommand(["session-end", "--agent", "test-agent"]);
 
-		// Read sessions.json and verify state changed to completed
-		const sessionsFile = Bun.file(sessionsPath);
-		const sessions = JSON.parse(await sessionsFile.text()) as AgentSession[];
-		const updatedSession = sessions.find((s) => s.agentName === "test-agent");
+		// Read sessions.db and verify state changed to completed
+		const readStore = createSessionStore(dbPath);
+		const updatedSession = readStore.getByName("test-agent");
+		readStore.close();
 
 		expect(updatedSession).toBeDefined();
 		expect(updatedSession?.state).toBe("completed");
@@ -236,9 +239,9 @@ describe("logCommand", () => {
 		expect(await markerFile.exists()).toBe(false);
 	});
 
-	test("session-end records metrics when agent session exists in sessions.json", async () => {
-		// Create sessions.json with a test agent
-		const sessionsPath = join(tempDir, ".overstory", "sessions.json");
+	test("session-end records metrics when agent session exists in sessions.db", async () => {
+		// Create sessions.db with a test agent
+		const sessionsDbPath = join(tempDir, ".overstory", "sessions.db");
 		const session: AgentSession = {
 			id: "session-002",
 			agentName: "metrics-agent",
@@ -257,7 +260,9 @@ describe("logCommand", () => {
 			escalationLevel: 0,
 			stalledSince: null,
 		};
-		await Bun.write(sessionsPath, `${JSON.stringify([session], null, "\t")}\n`);
+		const sessStore = createSessionStore(sessionsDbPath);
+		sessStore.upsert(session);
+		sessStore.close();
 
 		await logCommand(["session-end", "--agent", "metrics-agent"]);
 
@@ -274,17 +279,17 @@ describe("logCommand", () => {
 		expect(metrics[0]?.parentAgent).toBe("parent-agent");
 	});
 
-	test("session-end does not crash when sessions.json does not exist", async () => {
-		// No sessions.json file exists
+	test("session-end does not crash when sessions.db does not exist", async () => {
+		// No sessions.db file exists
 		// session-end should complete without throwing
 		await expect(
 			logCommand(["session-end", "--agent", "nonexistent-agent"]),
 		).resolves.toBeUndefined();
 	});
 
-	test("tool-start updates lastActivity timestamp in sessions.json", async () => {
-		// Create sessions.json with a test agent
-		const sessionsPath = join(tempDir, ".overstory", "sessions.json");
+	test("tool-start updates lastActivity timestamp in sessions.db", async () => {
+		// Create sessions.db with a test agent
+		const dbPath = join(tempDir, ".overstory", "sessions.db");
 		const oldTimestamp = new Date(Date.now() - 120_000).toISOString(); // 2 minutes ago
 		const session: AgentSession = {
 			id: "session-003",
@@ -304,14 +309,16 @@ describe("logCommand", () => {
 			escalationLevel: 0,
 			stalledSince: null,
 		};
-		await Bun.write(sessionsPath, `${JSON.stringify([session], null, "\t")}\n`);
+		const store = createSessionStore(dbPath);
+		store.upsert(session);
+		store.close();
 
 		await logCommand(["tool-start", "--agent", "activity-agent", "--tool-name", "Glob"]);
 
-		// Read sessions.json and verify lastActivity was updated
-		const sessionsFile = Bun.file(sessionsPath);
-		const sessions = JSON.parse(await sessionsFile.text()) as AgentSession[];
-		const updatedSession = sessions.find((s) => s.agentName === "activity-agent");
+		// Read sessions.db and verify lastActivity was updated
+		const readStore = createSessionStore(dbPath);
+		const updatedSession = readStore.getByName("activity-agent");
+		readStore.close();
 
 		expect(updatedSession).toBeDefined();
 		expect(updatedSession?.lastActivity).not.toBe(oldTimestamp);
@@ -321,8 +328,8 @@ describe("logCommand", () => {
 	});
 
 	test("tool-start transitions state from booting to working", async () => {
-		// Create sessions.json with agent in 'booting' state
-		const sessionsPath = join(tempDir, ".overstory", "sessions.json");
+		// Create sessions.db with agent in 'booting' state
+		const dbPath = join(tempDir, ".overstory", "sessions.db");
 		const session: AgentSession = {
 			id: "session-004",
 			agentName: "booting-agent",
@@ -341,14 +348,16 @@ describe("logCommand", () => {
 			escalationLevel: 0,
 			stalledSince: null,
 		};
-		await Bun.write(sessionsPath, `${JSON.stringify([session], null, "\t")}\n`);
+		const store = createSessionStore(dbPath);
+		store.upsert(session);
+		store.close();
 
 		await logCommand(["tool-start", "--agent", "booting-agent", "--tool-name", "Read"]);
 
-		// Read sessions.json and verify state changed to working
-		const sessionsFile = Bun.file(sessionsPath);
-		const sessions = JSON.parse(await sessionsFile.text()) as AgentSession[];
-		const updatedSession = sessions.find((s) => s.agentName === "booting-agent");
+		// Read sessions.db and verify state changed to working
+		const readStore = createSessionStore(dbPath);
+		const updatedSession = readStore.getByName("booting-agent");
+		readStore.close();
 
 		expect(updatedSession).toBeDefined();
 		expect(updatedSession?.state).toBe("working");

@@ -1,8 +1,8 @@
 /**
  * Integration tests for the watchdog daemon tick loop.
  *
- * Uses real filesystem (temp directories via mkdtemp) for sessions.json
- * read/write, real JSON serialization, and real health evaluation logic.
+ * Uses real filesystem (temp directories via mkdtemp) and real SessionStore
+ * (bun:sqlite) for session persistence, plus real health evaluation logic.
  *
  * Only tmux operations (isSessionAlive, killSession), triage, and nudge are
  * mocked via dependency injection (_tmux, _triage, _nudge params) because:
@@ -19,6 +19,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createSessionStore } from "../sessions/store.ts";
 import type { AgentSession, HealthCheck } from "../types.ts";
 import { runDaemonTick } from "./daemon.ts";
 
@@ -31,29 +32,30 @@ const THRESHOLDS = {
 
 // === Helpers ===
 
-/** Create a temp directory with .overstory/ subdirectory, ready for sessions.json. */
+/** Create a temp directory with .overstory/ subdirectory, ready for sessions.db. */
 async function createTempRoot(): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "overstory-daemon-test-"));
 	await mkdir(join(dir, ".overstory"), { recursive: true });
 	return dir;
 }
 
-/** Write sessions to the sessions.json file at the given root. */
-async function writeSessions(root: string, sessions: AgentSession[]): Promise<void> {
-	const path = join(root, ".overstory", "sessions.json");
-	await Bun.write(path, `${JSON.stringify(sessions, null, "\t")}\n`);
+/** Write sessions to the SessionStore (sessions.db) at the given root. */
+function writeSessionsToStore(root: string, sessions: AgentSession[]): void {
+	const dbPath = join(root, ".overstory", "sessions.db");
+	const store = createSessionStore(dbPath);
+	for (const session of sessions) {
+		store.upsert(session);
+	}
+	store.close();
 }
 
-/** Read sessions from the sessions.json file at the given root. */
-async function readSessions(root: string): Promise<AgentSession[]> {
-	const path = join(root, ".overstory", "sessions.json");
-	const file = Bun.file(path);
-	const exists = await file.exists();
-	if (!exists) return [];
-	const text = await file.text();
-	const parsed: unknown = JSON.parse(text);
-	if (!Array.isArray(parsed)) return [];
-	return parsed as AgentSession[];
+/** Read sessions from the SessionStore (sessions.db) at the given root. */
+function readSessionsFromStore(root: string): AgentSession[] {
+	const dbPath = join(root, ".overstory", "sessions.db");
+	const store = createSessionStore(dbPath);
+	const sessions = store.getAll();
+	store.close();
+	return sessions;
 }
 
 /** Build a test AgentSession with sensible defaults. */
@@ -164,8 +166,8 @@ afterEach(async () => {
 describe("daemon tick", () => {
 	// --- Test 1: tick with no sessions file ---
 
-	test("tick with no sessions file is a graceful no-op", async () => {
-		// sessions.json does not exist — daemon should not crash
+	test("tick with no sessions is a graceful no-op", async () => {
+		// No sessions in the store — daemon should not crash
 		const checks: HealthCheck[] = [];
 
 		await runDaemonTick({
@@ -178,10 +180,6 @@ describe("daemon tick", () => {
 
 		// No health checks should have been produced (no sessions to check)
 		expect(checks).toHaveLength(0);
-
-		// sessions.json should still not exist (no updates = no write)
-		const file = Bun.file(join(tempRoot, ".overstory", "sessions.json"));
-		expect(await file.exists()).toBe(false);
 	});
 
 	// --- Test 2: tick with healthy sessions ---
@@ -192,7 +190,7 @@ describe("daemon tick", () => {
 			lastActivity: new Date().toISOString(),
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const checks: HealthCheck[] = [];
 
@@ -210,9 +208,8 @@ describe("daemon tick", () => {
 		expect(check?.state).toBe("working");
 		expect(check?.action).toBe("none");
 
-		// sessions.json should be unchanged because state didn't change.
-		// The daemon only writes when `updated` is true.
-		const reloaded = await readSessions(tempRoot);
+		// Session state should be unchanged because state didn't change.
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded).toHaveLength(1);
 		expect(reloaded[0]?.state).toBe("working");
 	});
@@ -227,7 +224,7 @@ describe("daemon tick", () => {
 			lastActivity: new Date().toISOString(),
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-dead-agent": false });
 		const checks: HealthCheck[] = [];
@@ -249,7 +246,7 @@ describe("daemon tick", () => {
 		expect(tmuxMock.killed).toHaveLength(0);
 
 		// Session state should be persisted as zombie
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded).toHaveLength(1);
 		expect(reloaded[0]?.state).toBe("zombie");
 	});
@@ -265,7 +262,7 @@ describe("daemon tick", () => {
 			lastActivity: oldActivity,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-zombie-agent": true });
 		const checks: HealthCheck[] = [];
@@ -285,7 +282,7 @@ describe("daemon tick", () => {
 		expect(tmuxMock.killed).toContain("overstory-zombie-agent");
 
 		// Session persisted as zombie
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("zombie");
 	});
 
@@ -300,7 +297,7 @@ describe("daemon tick", () => {
 			lastActivity: staleActivity,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-stalled-agent": true });
 		const checks: HealthCheck[] = [];
@@ -326,7 +323,7 @@ describe("daemon tick", () => {
 		expect(nudgeMock.calls).toHaveLength(0);
 
 		// Session should be stalled with stalledSince set and escalationLevel 0
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("stalled");
 		expect(reloaded[0]?.escalationLevel).toBe(0);
 		expect(reloaded[0]?.stalledSince).not.toBeNull();
@@ -345,7 +342,7 @@ describe("daemon tick", () => {
 			stalledSince,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-stalled-agent": true });
 		const nudgeMock = nudgeTracker();
@@ -360,7 +357,7 @@ describe("daemon tick", () => {
 		});
 
 		// Level should advance to 1 and nudge should be sent
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.escalationLevel).toBe(1);
 		expect(nudgeMock.calls).toHaveLength(1);
 		expect(nudgeMock.calls[0]?.agentName).toBe("stalled-agent");
@@ -383,7 +380,7 @@ describe("daemon tick", () => {
 			stalledSince,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-stalled-agent": true });
 		let triageCalled = false;
@@ -412,7 +409,7 @@ describe("daemon tick", () => {
 
 		// Triage returned terminate — session should be zombie
 		expect(tmuxMock.killed).toContain("overstory-stalled-agent");
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("zombie");
 	});
 
@@ -428,7 +425,7 @@ describe("daemon tick", () => {
 			stalledSince,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-stalled-agent": true });
 		let triageCalled = false;
@@ -455,7 +452,7 @@ describe("daemon tick", () => {
 		expect(tmuxMock.killed).toHaveLength(0);
 
 		// Session stays stalled at level 2
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("stalled");
 		expect(reloaded[0]?.escalationLevel).toBe(2);
 	});
@@ -473,7 +470,7 @@ describe("daemon tick", () => {
 			stalledSince,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-doomed-agent": true });
 
@@ -489,7 +486,7 @@ describe("daemon tick", () => {
 		// Level 3 = terminate
 		expect(tmuxMock.killed).toContain("overstory-doomed-agent");
 
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("zombie");
 		// Escalation is reset after termination
 		expect(reloaded[0]?.escalationLevel).toBe(0);
@@ -508,7 +505,7 @@ describe("daemon tick", () => {
 			stalledSince,
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const tmuxMock = tmuxWithLiveness({ "overstory-retry-agent": true });
 		const nudgeMock = nudgeTracker();
@@ -531,7 +528,7 @@ describe("daemon tick", () => {
 		expect(tmuxMock.killed).toHaveLength(0);
 
 		// Session stays stalled
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("stalled");
 	});
 
@@ -546,7 +543,7 @@ describe("daemon tick", () => {
 			stalledSince: new Date(Date.now() - 130_000).toISOString(),
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		await runDaemonTick({
 			root: tempRoot,
@@ -558,7 +555,7 @@ describe("daemon tick", () => {
 
 		// Health check should return action: "none" for recovered agent
 		// Escalation tracking should be reset
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("working");
 		expect(reloaded[0]?.escalationLevel).toBe(0);
 		expect(reloaded[0]?.stalledSince).toBeNull();
@@ -592,7 +589,7 @@ describe("daemon tick", () => {
 			}),
 		];
 
-		await writeSessions(tempRoot, sessions);
+		writeSessionsToStore(tempRoot, sessions);
 
 		const tmuxMock = tmuxWithLiveness({
 			"overstory-agent-alpha": true,
@@ -614,7 +611,7 @@ describe("daemon tick", () => {
 		expect(checks).toHaveLength(2);
 
 		// Reload and verify persistence
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded).toHaveLength(3);
 
 		const alpha = reloaded.find((s) => s.agentName === "agent-alpha");
@@ -635,20 +632,13 @@ describe("daemon tick", () => {
 		expect(gamma?.state).toBe("completed");
 	});
 
-	test("session persistence: no write when nothing changes", async () => {
+	test("session persistence: state unchanged when nothing changes", async () => {
 		const session = makeSession({
 			state: "working",
 			lastActivity: new Date().toISOString(),
 		});
 
-		await writeSessions(tempRoot, [session]);
-
-		// Record the file modification time before the tick
-		const pathStr = join(tempRoot, ".overstory", "sessions.json");
-		const statBefore = await Bun.file(pathStr).lastModified;
-
-		// Small delay to ensure mtime would differ if file is rewritten
-		await Bun.sleep(50);
+		writeSessionsToStore(tempRoot, [session]);
 
 		await runDaemonTick({
 			root: tempRoot,
@@ -657,10 +647,10 @@ describe("daemon tick", () => {
 			_triage: triageAlways("extend"),
 		});
 
-		const statAfter = await Bun.file(pathStr).lastModified;
-
-		// File should NOT have been rewritten since no state changed
-		expect(statAfter).toBe(statBefore);
+		// Session state should remain unchanged since nothing triggered a transition
+		const reloaded = readSessionsFromStore(tempRoot);
+		expect(reloaded).toHaveLength(1);
+		expect(reloaded[0]?.state).toBe("working");
 	});
 
 	// --- Edge cases ---
@@ -668,7 +658,7 @@ describe("daemon tick", () => {
 	test("completed sessions are skipped entirely", async () => {
 		const session = makeSession({ state: "completed" });
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const checks: HealthCheck[] = [];
 
@@ -684,7 +674,7 @@ describe("daemon tick", () => {
 		expect(checks).toHaveLength(0);
 
 		// State unchanged
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("completed");
 	});
 
@@ -720,7 +710,7 @@ describe("daemon tick", () => {
 			}),
 		];
 
-		await writeSessions(tempRoot, sessions);
+		writeSessionsToStore(tempRoot, sessions);
 
 		const tmuxMock = tmuxWithLiveness({
 			"overstory-healthy": true,
@@ -743,7 +733,7 @@ describe("daemon tick", () => {
 		// 3 non-completed sessions processed
 		expect(checks).toHaveLength(3);
 
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 
 		const healthy = reloaded.find((s) => s.agentName === "healthy");
 		const dying = reloaded.find((s) => s.agentName === "dying");
@@ -757,7 +747,7 @@ describe("daemon tick", () => {
 	});
 
 	test("empty sessions array is a no-op", async () => {
-		await writeSessions(tempRoot, []);
+		writeSessionsToStore(tempRoot, []);
 
 		const checks: HealthCheck[] = [];
 
@@ -778,7 +768,7 @@ describe("daemon tick", () => {
 			lastActivity: new Date().toISOString(),
 		});
 
-		await writeSessions(tempRoot, [session]);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const checks: HealthCheck[] = [];
 
@@ -793,33 +783,28 @@ describe("daemon tick", () => {
 		expect(checks).toHaveLength(1);
 		expect(checks[0]?.state).toBe("working");
 
-		const reloaded = await readSessions(tempRoot);
+		const reloaded = readSessionsFromStore(tempRoot);
 		expect(reloaded[0]?.state).toBe("working");
 	});
 
 	// --- Backward compatibility ---
 
-	test("sessions without escalation fields get backfilled", async () => {
-		// Write sessions.json without the new fields (simulates pre-upgrade data)
-		const rawSession = {
+	test("sessions with default escalation fields are processed correctly", async () => {
+		// Write a session with default (zero) escalation fields
+		const session = makeSession({
 			id: "session-old",
 			agentName: "old-agent",
-			capability: "builder",
 			worktreePath: "/tmp/test",
 			branchName: "overstory/old-agent/task",
 			beadId: "task",
 			tmuxSession: "overstory-old-agent",
 			state: "working",
 			pid: process.pid,
-			parentAgent: null,
-			depth: 0,
-			startedAt: new Date().toISOString(),
-			lastActivity: new Date().toISOString(),
-			// No escalationLevel or stalledSince
-		};
+			escalationLevel: 0,
+			stalledSince: null,
+		});
 
-		const path = join(tempRoot, ".overstory", "sessions.json");
-		await Bun.write(path, `${JSON.stringify([rawSession], null, "\t")}\n`);
+		writeSessionsToStore(tempRoot, [session]);
 
 		const checks: HealthCheck[] = [];
 

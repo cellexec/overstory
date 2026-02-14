@@ -19,6 +19,7 @@ import { filterToolArgs } from "../events/tool-filter.ts";
 import { createLogger } from "../logging/logger.ts";
 import { createMetricsStore } from "../metrics/store.ts";
 import { estimateCost, parseTranscriptUsage } from "../metrics/transcript.ts";
+import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
 
 /**
@@ -58,25 +59,23 @@ async function getSessionDir(logsBase: string, agentName: string): Promise<strin
 }
 
 /**
- * Update the lastActivity timestamp for an agent in sessions.json.
+ * Update the lastActivity timestamp for an agent in the SessionStore.
  * Non-fatal: silently ignores errors to avoid breaking hook execution.
  */
-async function updateLastActivity(projectRoot: string, agentName: string): Promise<void> {
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const file = Bun.file(sessionsPath);
-	if (!(await file.exists())) return;
-
+function updateLastActivity(projectRoot: string, agentName: string): void {
 	try {
-		const text = await file.text();
-		const sessions = JSON.parse(text) as AgentSession[];
-		const session = sessions.find((s) => s.agentName === agentName);
-		if (session) {
-			session.lastActivity = new Date().toISOString();
-			// Transition from booting to working on first activity
-			if (session.state === "booting") {
-				session.state = "working";
+		const overstoryDir = join(projectRoot, ".overstory");
+		const { store } = openSessionStore(overstoryDir);
+		try {
+			const session = store.getByName(agentName);
+			if (session) {
+				store.updateLastActivity(agentName);
+				if (session.state === "booting") {
+					store.updateState(agentName, "working");
+				}
 			}
-			await Bun.write(sessionsPath, `${JSON.stringify(sessions, null, "\t")}\n`);
+		} finally {
+			store.close();
 		}
 	} catch {
 		// Non-fatal: don't break logging if session update fails
@@ -84,23 +83,19 @@ async function updateLastActivity(projectRoot: string, agentName: string): Promi
 }
 
 /**
- * Transition agent state to 'completed' in sessions.json.
+ * Transition agent state to 'completed' in the SessionStore.
  * Called when session-end event fires.
  * Non-fatal: silently ignores errors to avoid breaking hook execution.
  */
-async function transitionToCompleted(projectRoot: string, agentName: string): Promise<void> {
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const file = Bun.file(sessionsPath);
-	if (!(await file.exists())) return;
-
+function transitionToCompleted(projectRoot: string, agentName: string): void {
 	try {
-		const text = await file.text();
-		const sessions = JSON.parse(text) as AgentSession[];
-		const session = sessions.find((s) => s.agentName === agentName);
-		if (session) {
-			session.state = "completed";
-			session.lastActivity = new Date().toISOString();
-			await Bun.write(sessionsPath, `${JSON.stringify(sessions, null, "\t")}\n`);
+		const overstoryDir = join(projectRoot, ".overstory");
+		const { store } = openSessionStore(overstoryDir);
+		try {
+			store.updateState(agentName, "completed");
+			store.updateLastActivity(agentName);
+		} finally {
+			store.close();
 		}
 	} catch {
 		// Non-fatal: don't break logging if session update fails
@@ -111,18 +106,15 @@ async function transitionToCompleted(projectRoot: string, agentName: string): Pr
  * Look up an agent's session record.
  * Returns null if not found.
  */
-async function getAgentSession(
-	projectRoot: string,
-	agentName: string,
-): Promise<AgentSession | null> {
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const file = Bun.file(sessionsPath);
-	if (!(await file.exists())) return null;
-
+function getAgentSession(projectRoot: string, agentName: string): AgentSession | null {
 	try {
-		const text = await file.text();
-		const sessions = JSON.parse(text) as AgentSession[];
-		return sessions.find((s) => s.agentName === agentName) ?? null;
+		const overstoryDir = join(projectRoot, ".overstory");
+		const { store } = openSessionStore(overstoryDir);
+		try {
+			return store.getByName(agentName);
+		} finally {
+			store.close();
+		}
 	} catch {
 		return null;
 	}
@@ -232,7 +224,7 @@ export async function logCommand(args: string[]): Promise<void> {
 		case "tool-start": {
 			// Backward compatibility: always write to per-agent log files
 			logger.toolStart(toolName, toolInput ?? {});
-			await updateLastActivity(config.project.root, agentName);
+			updateLastActivity(config.project.root, agentName);
 
 			// When --stdin is used, also write to EventStore for structured observability
 			if (useStdin) {
@@ -263,7 +255,7 @@ export async function logCommand(args: string[]): Promise<void> {
 		case "tool-end": {
 			// Backward compatibility: always write to per-agent log files
 			logger.toolEnd(toolName, 0);
-			await updateLastActivity(config.project.root, agentName);
+			updateLastActivity(config.project.root, agentName);
 
 			// When --stdin is used, write to EventStore and correlate with tool-start
 			if (useStdin) {
@@ -298,10 +290,10 @@ export async function logCommand(args: string[]): Promise<void> {
 		case "session-end":
 			logger.info("session.end", { agentName });
 			// Transition agent state to completed
-			await transitionToCompleted(config.project.root, agentName);
+			transitionToCompleted(config.project.root, agentName);
 			// Look up agent session for identity update and metrics recording
 			{
-				const agentSession = await getAgentSession(config.project.root, agentName);
+				const agentSession = getAgentSession(config.project.root, agentName);
 				const beadId = agentSession?.beadId ?? null;
 
 				// Update agent identity with completed session

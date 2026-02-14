@@ -15,13 +15,8 @@ import { loadConfig } from "../config.ts";
 import { AgentError } from "../errors.ts";
 import { createMetricsStore } from "../metrics/store.ts";
 import { createMulchClient } from "../mulch/client.ts";
-import type {
-	AgentIdentity,
-	AgentManifest,
-	AgentSession,
-	SessionCheckpoint,
-	SessionMetrics,
-} from "../types.ts";
+import { openSessionStore } from "../sessions/compat.ts";
+import type { AgentIdentity, AgentManifest, SessionCheckpoint, SessionMetrics } from "../types.ts";
 import { getCurrentSessionName } from "../worktree/tmux.ts";
 
 /**
@@ -172,24 +167,6 @@ export async function primeCommand(args: string[]): Promise<void> {
 }
 
 /**
- * Load the sessions registry from .overstory/sessions.json.
- * Returns an empty array if the file doesn't exist.
- */
-async function loadSessions(sessionsPath: string): Promise<AgentSession[]> {
-	const file = Bun.file(sessionsPath);
-	const exists = await file.exists();
-	if (!exists) {
-		return [];
-	}
-	try {
-		const text = await file.text();
-		return JSON.parse(text) as AgentSession[];
-	} catch {
-		return [];
-	}
-}
-
-/**
  * Output context for a specific agent.
  */
 async function outputAgentContext(
@@ -202,10 +179,25 @@ async function outputAgentContext(
 
 	sections.push(`# Agent Context: ${agentName}`);
 
-	// Check if the agent exists in sessions.json or has an identity file
-	const sessionsPath = join(config.project.root, ".overstory", "sessions.json");
-	const sessions = await loadSessions(sessionsPath);
-	const sessionExists = sessions.some((s) => s.agentName === agentName);
+	// Check if the agent exists in the SessionStore or has an identity file
+	const overstoryDir = join(config.project.root, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
+	let sessionExists = false;
+	let boundSession: { beadId: string } | null = null;
+	try {
+		const agentSession = store.getByName(agentName);
+		sessionExists = agentSession !== null;
+		if (
+			agentSession &&
+			agentSession.state !== "completed" &&
+			agentSession.state !== "zombie" &&
+			agentSession.beadId
+		) {
+			boundSession = { beadId: agentSession.beadId };
+		}
+	} finally {
+		store.close();
+	}
 
 	// Identity section
 	let identity: AgentIdentity | null = null;
@@ -231,12 +223,9 @@ async function outputAgentContext(
 	}
 
 	// Activation context: if agent has a bound task, inject it
-	const session = sessions.find(
-		(s) => s.agentName === agentName && s.state !== "completed" && s.state !== "zombie",
-	);
-	if (session?.beadId) {
+	if (boundSession) {
 		sections.push("\n## Activation");
-		sections.push(`You have a bound task: **${session.beadId}**`);
+		sections.push(`You have a bound task: **${boundSession.beadId}**`);
 		sections.push("Read your overlay at `.claude/CLAUDE.md` and begin working immediately.");
 		sections.push("Do not wait for dispatch mail. Your assignment was bound at spawn time.");
 	}

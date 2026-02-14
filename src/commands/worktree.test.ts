@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { createSessionStore } from "../sessions/store.ts";
 import { cleanupTempDir, createTempGitRepo, runGitInDir } from "../test-helpers.ts";
 import type { AgentSession } from "../types.ts";
 import { createWorktree } from "../worktree/manager.ts";
@@ -82,13 +83,15 @@ describe("worktreeCommand", () => {
 	}
 
 	/**
-	 * Helper to write sessions.json to the temp repo.
+	 * Helper to write sessions to SessionStore (sessions.db) in the temp repo.
 	 */
-	async function writeSessions(sessions: AgentSession[]): Promise<void> {
-		await Bun.write(
-			join(tempDir, ".overstory", "sessions.json"),
-			`${JSON.stringify(sessions, null, "\t")}\n`,
-		);
+	function writeSessionsToStore(sessions: AgentSession[]): void {
+		const dbPath = join(tempDir, ".overstory", "sessions.db");
+		const store = createSessionStore(dbPath);
+		for (const session of sessions) {
+			store.upsert(session);
+		}
+		store.close();
 	}
 
 	describe("help flags", () => {
@@ -145,8 +148,8 @@ describe("worktreeCommand", () => {
 				"overstory/test-agent/task-1",
 			]);
 
-			// Write sessions.json to associate worktree with agent
-			const sessions: AgentSession[] = [
+			// Write sessions.db to associate worktree with agent
+			writeSessionsToStore([
 				{
 					id: "session-1",
 					agentName: "test-agent",
@@ -165,11 +168,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: null,
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["list"]);
 			const out = output();
@@ -196,8 +195,8 @@ describe("worktreeCommand", () => {
 				"overstory/test-agent/task-1",
 			]);
 
-			// Write sessions.json
-			const sessions: AgentSession[] = [
+			// Write sessions.db
+			writeSessionsToStore([
 				{
 					id: "session-1",
 					agentName: "test-agent",
@@ -216,11 +215,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: null,
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["list", "--json"]);
 			const out = output();
@@ -243,7 +238,7 @@ describe("worktreeCommand", () => {
 		});
 
 		test("worktrees without sessions show unknown state", async () => {
-			// Create a worktree but no sessions.json entry
+			// Create a worktree but no sessions.db entry
 			const worktreesDir = join(tempDir, ".overstory", "worktrees");
 			await mkdir(worktreesDir, { recursive: true });
 
@@ -288,8 +283,8 @@ describe("worktreeCommand", () => {
 				"overstory/completed-agent/task-done",
 			]);
 
-			// Write sessions.json with completed state
-			const sessions: AgentSession[] = [
+			// Write sessions.db with completed state
+			writeSessionsToStore([
 				{
 					id: "session-1",
 					agentName: "completed-agent",
@@ -308,11 +303,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: null,
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["clean"]);
 			const out = output();
@@ -347,7 +338,7 @@ describe("worktreeCommand", () => {
 				"overstory/done-agent/task-x",
 			]);
 
-			const sessions: AgentSession[] = [
+			writeSessionsToStore([
 				{
 					id: "session-1",
 					agentName: "done-agent",
@@ -366,11 +357,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: null,
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["clean", "--json"]);
 			const out = output();
@@ -386,10 +373,10 @@ describe("worktreeCommand", () => {
 			expect(parsed.pruned).toBe(1); // The zombie session was pruned
 		});
 
-		test("zombie sessions whose worktree paths no longer exist get pruned from sessions.json", async () => {
-			// Create sessions.json with a zombie entry whose worktree doesn't exist
+		test("zombie sessions whose worktree paths no longer exist get pruned from sessions.db", async () => {
+			// Create sessions.db with a zombie entry whose worktree doesn't exist
 			const nonExistentPath = join(tempDir, ".overstory", "worktrees", "ghost-agent");
-			const sessions: AgentSession[] = [
+			writeSessionsToStore([
 				{
 					id: "session-ghost",
 					agentName: "ghost-agent",
@@ -408,11 +395,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: null,
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["clean", "--json"]);
 			const out = output();
@@ -425,9 +408,11 @@ describe("worktreeCommand", () => {
 
 			expect(parsed.pruned).toBe(1);
 
-			// Verify sessions.json no longer contains the zombie
-			const sessionsFile = Bun.file(join(tempDir, ".overstory", "sessions.json"));
-			const updatedSessions = JSON.parse(await sessionsFile.text()) as AgentSession[];
+			// Verify sessions.db no longer contains the zombie
+			const dbPath = join(tempDir, ".overstory", "sessions.db");
+			const store = createSessionStore(dbPath);
+			const updatedSessions = store.getAll();
+			store.close();
 			expect(updatedSessions).toHaveLength(0);
 		});
 
@@ -445,7 +430,7 @@ describe("worktreeCommand", () => {
 				"overstory/stalled-agent/task-stuck",
 			]);
 
-			const sessions: AgentSession[] = [
+			writeSessionsToStore([
 				{
 					id: "session-1",
 					agentName: "stalled-agent",
@@ -464,11 +449,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: new Date().toISOString(),
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["clean"]);
 			const out = output();
@@ -498,8 +479,8 @@ describe("worktreeCommand", () => {
 				beadId: "task-wip",
 			});
 
-			// Write sessions.json with both agents
-			await writeSessions([
+			// Write sessions.db with both agents
+			writeSessionsToStore([
 				makeSession({
 					id: "session-1",
 					agentName: "completed-agent",
@@ -561,7 +542,7 @@ describe("worktreeCommand", () => {
 			});
 
 			// Write sessions with different states
-			await writeSessions([
+			writeSessionsToStore([
 				makeSession({
 					id: "session-1",
 					agentName: "completed-agent",
@@ -610,7 +591,7 @@ describe("worktreeCommand", () => {
 			const path2 = join(worktreesDir, "agent-2");
 			await runGitInDir(tempDir, ["worktree", "add", path2, "-b", "overstory/agent-2/task-2"]);
 
-			const sessions: AgentSession[] = [
+			writeSessionsToStore([
 				{
 					id: "session-1",
 					agentName: "agent-1",
@@ -647,11 +628,7 @@ describe("worktreeCommand", () => {
 					escalationLevel: 0,
 					stalledSince: null,
 				},
-			];
-			await Bun.write(
-				join(tempDir, ".overstory", "sessions.json"),
-				`${JSON.stringify(sessions, null, "\t")}\n`,
-			);
+			]);
 
 			await worktreeCommand(["clean"]);
 			const out = output();

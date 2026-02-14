@@ -9,7 +9,7 @@
  * 5. Generate + write hooks config
  * 6. Claim beads issue
  * 7. Create tmux session running claude
- * 8. Record session in sessions.json
+ * 8. Record session in SessionStore (sessions.db)
  * 9. Return AgentSession
  */
 
@@ -23,6 +23,7 @@ import type { BeadIssue } from "../beads/client.ts";
 import { createBeadsClient } from "../beads/client.ts";
 import { loadConfig } from "../config.ts";
 import { AgentError, HierarchyError, ValidationError } from "../errors.ts";
+import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession, OverlayConfig } from "../types.ts";
 import { createWorktree } from "../worktree/manager.ts";
 import { createSession, sendKeys } from "../worktree/tmux.ts";
@@ -65,31 +66,6 @@ function getFlag(args: string[], flag: string): string | undefined {
 		return undefined;
 	}
 	return args[idx + 1];
-}
-
-/**
- * Load the sessions registry from .overstory/sessions.json.
- * Returns an empty array if the file doesn't exist.
- */
-async function loadSessions(sessionsPath: string): Promise<AgentSession[]> {
-	const file = Bun.file(sessionsPath);
-	const exists = await file.exists();
-	if (!exists) {
-		return [];
-	}
-	try {
-		const text = await file.text();
-		return JSON.parse(text) as AgentSession[];
-	} catch {
-		return [];
-	}
-}
-
-/**
- * Save the sessions registry to .overstory/sessions.json.
- */
-async function saveSessions(sessionsPath: string, sessions: AgentSession[]): Promise<void> {
-	await Bun.write(sessionsPath, `${JSON.stringify(sessions, null, "\t")}\n`);
 }
 
 /**
@@ -282,201 +258,201 @@ export async function slingCommand(args: string[]): Promise<void> {
 	}
 
 	// 4. Check name uniqueness and concurrency limit against active sessions
-	const sessionsPath = join(config.project.root, ".overstory", "sessions.json");
-	const sessions = await loadSessions(sessionsPath);
-
-	const activeSessions = sessions.filter((s) => s.state !== "zombie" && s.state !== "completed");
-	if (activeSessions.length >= config.agents.maxConcurrent) {
-		throw new AgentError(
-			`Max concurrent agent limit reached: ${activeSessions.length}/${config.agents.maxConcurrent} active agents`,
-			{ agentName: name },
-		);
-	}
-
-	const existing = sessions.find(
-		(s) => s.agentName === name && s.state !== "zombie" && s.state !== "completed",
-	);
-	if (existing) {
-		throw new AgentError(`Agent name "${name}" is already in use (state: ${existing.state})`, {
-			agentName: name,
-		});
-	}
-
-	// 4b. Enforce stagger delay between agent spawns
-	const staggerMs = calculateStaggerDelay(config.agents.staggerDelayMs, activeSessions);
-	if (staggerMs > 0) {
-		await Bun.sleep(staggerMs);
-	}
-
-	// 5. Validate bead exists and is in a workable state (if beads enabled)
-	const beads = createBeadsClient(config.project.root);
-	if (config.beads.enabled) {
-		let issue: BeadIssue;
-		try {
-			issue = await beads.show(taskId);
-		} catch (err) {
-			throw new AgentError(`Bead task "${taskId}" not found or inaccessible`, {
-				agentName: name,
-				cause: err instanceof Error ? err : undefined,
-			});
-		}
-
-		const workableStatuses = ["open", "in_progress"];
-		if (!workableStatuses.includes(issue.status)) {
-			throw new ValidationError(
-				`Bead task "${taskId}" is not workable (status: ${issue.status}). Only open or in_progress issues can be assigned.`,
-				{ field: "taskId", value: taskId },
+	const overstoryDir = join(config.project.root, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
+	try {
+		const activeSessions = store.getActive();
+		if (activeSessions.length >= config.agents.maxConcurrent) {
+			throw new AgentError(
+				`Max concurrent agent limit reached: ${activeSessions.length}/${config.agents.maxConcurrent} active agents`,
+				{ agentName: name },
 			);
 		}
-	}
 
-	// 6. Create worktree
-	const worktreeBaseDir = join(config.project.root, config.worktrees.baseDir);
-	await mkdir(worktreeBaseDir, { recursive: true });
-
-	const { path: worktreePath, branch: branchName } = await createWorktree({
-		repoRoot: config.project.root,
-		baseDir: worktreeBaseDir,
-		agentName: name,
-		baseBranch: config.project.canonicalBranch,
-		beadId: taskId,
-	});
-
-	// 7. Generate + write overlay CLAUDE.md
-	const agentDefPath = join(config.project.root, config.agents.baseDir, agentDef.file);
-	const baseDefinition = await Bun.file(agentDefPath).text();
-
-	const overlayConfig: OverlayConfig = {
-		agentName: name,
-		beadId: taskId,
-		specPath: absoluteSpecPath,
-		branchName,
-		worktreePath,
-		fileScope,
-		mulchDomains: config.mulch.enabled ? config.mulch.domains : [],
-		parentAgent: parentAgent,
-		depth,
-		canSpawn: agentDef.canSpawn,
-		capability,
-		baseDefinition,
-	};
-
-	try {
-		await writeOverlay(worktreePath, overlayConfig, config.project.root);
-	} catch (err) {
-		// Clean up the orphaned worktree created in step 6 (overstory-p4st)
-		try {
-			const cleanupProc = Bun.spawn(["git", "worktree", "remove", "--force", worktreePath], {
-				cwd: config.project.root,
-				stdout: "pipe",
-				stderr: "pipe",
+		const existing = store.getByName(name);
+		if (existing && existing.state !== "zombie" && existing.state !== "completed") {
+			throw new AgentError(`Agent name "${name}" is already in use (state: ${existing.state})`, {
+				agentName: name,
 			});
-			await cleanupProc.exited;
-		} catch {
-			// Best-effort cleanup; the original error is more important
 		}
-		throw err;
-	}
 
-	// 8. Deploy hooks config (capability-specific guards)
-	await deployHooks(worktreePath, name, capability);
-
-	// 9. Claim beads issue
-	if (config.beads.enabled) {
-		try {
-			await beads.claim(taskId);
-		} catch {
-			// Non-fatal: issue may already be claimed
+		// 4b. Enforce stagger delay between agent spawns
+		const staggerMs = calculateStaggerDelay(config.agents.staggerDelayMs, activeSessions);
+		if (staggerMs > 0) {
+			await Bun.sleep(staggerMs);
 		}
-	}
 
-	// 10. Create agent identity (if new)
-	const identityBaseDir = join(config.project.root, ".overstory", "agents");
-	const existingIdentity = await loadIdentity(identityBaseDir, name);
-	if (!existingIdentity) {
-		await createIdentity(identityBaseDir, {
-			name,
-			capability,
-			created: new Date().toISOString(),
-			sessionsCompleted: 0,
-			expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
-			recentTasks: [],
+		// 5. Validate bead exists and is in a workable state (if beads enabled)
+		const beads = createBeadsClient(config.project.root);
+		if (config.beads.enabled) {
+			let issue: BeadIssue;
+			try {
+				issue = await beads.show(taskId);
+			} catch (err) {
+				throw new AgentError(`Bead task "${taskId}" not found or inaccessible`, {
+					agentName: name,
+					cause: err instanceof Error ? err : undefined,
+				});
+			}
+
+			const workableStatuses = ["open", "in_progress"];
+			if (!workableStatuses.includes(issue.status)) {
+				throw new ValidationError(
+					`Bead task "${taskId}" is not workable (status: ${issue.status}). Only open or in_progress issues can be assigned.`,
+					{ field: "taskId", value: taskId },
+				);
+			}
+		}
+
+		// 6. Create worktree
+		const worktreeBaseDir = join(config.project.root, config.worktrees.baseDir);
+		await mkdir(worktreeBaseDir, { recursive: true });
+
+		const { path: worktreePath, branch: branchName } = await createWorktree({
+			repoRoot: config.project.root,
+			baseDir: worktreeBaseDir,
+			agentName: name,
+			baseBranch: config.project.canonicalBranch,
+			beadId: taskId,
 		});
-	}
 
-	// 11. Create tmux session running claude in interactive mode
-	const tmuxSessionName = `overstory-${name}`;
-	const claudeCmd = `claude --model ${agentDef.model} --dangerously-skip-permissions`;
-	const pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
-		OVERSTORY_AGENT_NAME: name,
-		OVERSTORY_WORKTREE_PATH: worktreePath,
-	});
+		// 7. Generate + write overlay CLAUDE.md
+		const agentDefPath = join(config.project.root, config.agents.baseDir, agentDef.file);
+		const baseDefinition = await Bun.file(agentDefPath).text();
 
-	// 12. Record session BEFORE sending the beacon so that hook-triggered
-	// updateLastActivity() can find the entry and transition booting->working.
-	// Without this, a race exists: hooks fire before sessions.json is written,
-	// leaving the agent stuck in "booting" (overstory-036f).
-	const session: AgentSession = {
-		id: `session-${Date.now()}-${name}`,
-		agentName: name,
-		capability,
-		worktreePath,
-		branchName,
-		beadId: taskId,
-		tmuxSession: tmuxSessionName,
-		state: "booting",
-		pid,
-		parentAgent: parentAgent,
-		depth,
-		runId: null,
-		startedAt: new Date().toISOString(),
-		lastActivity: new Date().toISOString(),
-		escalationLevel: 0,
-		stalledSince: null,
-	};
+		const overlayConfig: OverlayConfig = {
+			agentName: name,
+			beadId: taskId,
+			specPath: absoluteSpecPath,
+			branchName,
+			worktreePath,
+			fileScope,
+			mulchDomains: config.mulch.enabled ? config.mulch.domains : [],
+			parentAgent: parentAgent,
+			depth,
+			canSpawn: agentDef.canSpawn,
+			capability,
+			baseDefinition,
+		};
 
-	sessions.push(session);
-	await saveSessions(sessionsPath, sessions);
+		try {
+			await writeOverlay(worktreePath, overlayConfig, config.project.root);
+		} catch (err) {
+			// Clean up the orphaned worktree created in step 6 (overstory-p4st)
+			try {
+				const cleanupProc = Bun.spawn(["git", "worktree", "remove", "--force", worktreePath], {
+					cwd: config.project.root,
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				await cleanupProc.exited;
+			} catch {
+				// Best-effort cleanup; the original error is more important
+			}
+			throw err;
+		}
 
-	// 12b. Send beacon prompt via tmux send-keys
-	// Allow Claude Code time to initialize its TUI before sending input.
-	// 3s gives the TUI enough time to render and attach its input handler.
-	await Bun.sleep(3_000);
-	const beacon = buildBeacon({
-		agentName: name,
-		capability,
-		taskId,
-		parentAgent,
-		depth,
-	});
-	await sendKeys(tmuxSessionName, beacon);
+		// 8. Deploy hooks config (capability-specific guards)
+		await deployHooks(worktreePath, name, capability);
 
-	// 12c. Send a follow-up Enter after a short delay to ensure submission.
-	// Claude Code's TUI may consume the first Enter during initialization,
-	// leaving the beacon text visible but unsubmitted (overstory-yhv6).
-	// A redundant Enter on an empty input line is harmless.
-	await Bun.sleep(500);
-	await sendKeys(tmuxSessionName, "");
+		// 9. Claim beads issue
+		if (config.beads.enabled) {
+			try {
+				await beads.claim(taskId);
+			} catch {
+				// Non-fatal: issue may already be claimed
+			}
+		}
 
-	// 13. Output result
-	const output = {
-		agentName: name,
-		capability,
-		taskId,
-		branch: branchName,
-		worktree: worktreePath,
-		tmuxSession: tmuxSessionName,
-		pid,
-	};
+		// 10. Create agent identity (if new)
+		const identityBaseDir = join(config.project.root, ".overstory", "agents");
+		const existingIdentity = await loadIdentity(identityBaseDir, name);
+		if (!existingIdentity) {
+			await createIdentity(identityBaseDir, {
+				name,
+				capability,
+				created: new Date().toISOString(),
+				sessionsCompleted: 0,
+				expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
+				recentTasks: [],
+			});
+		}
 
-	if (args.includes("--json")) {
-		process.stdout.write(`${JSON.stringify(output)}\n`);
-	} else {
-		process.stdout.write(`🚀 Agent "${name}" launched!\n`);
-		process.stdout.write(`   Task:     ${taskId}\n`);
-		process.stdout.write(`   Branch:   ${branchName}\n`);
-		process.stdout.write(`   Worktree: ${worktreePath}\n`);
-		process.stdout.write(`   Tmux:     ${tmuxSessionName}\n`);
-		process.stdout.write(`   PID:      ${pid}\n`);
+		// 11. Create tmux session running claude in interactive mode
+		const tmuxSessionName = `overstory-${name}`;
+		const claudeCmd = `claude --model ${agentDef.model} --dangerously-skip-permissions`;
+		const pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
+			OVERSTORY_AGENT_NAME: name,
+			OVERSTORY_WORKTREE_PATH: worktreePath,
+		});
+
+		// 12. Record session BEFORE sending the beacon so that hook-triggered
+		// updateLastActivity() can find the entry and transition booting->working.
+		// Without this, a race exists: hooks fire before the session is persisted,
+		// leaving the agent stuck in "booting" (overstory-036f).
+		const session: AgentSession = {
+			id: `session-${Date.now()}-${name}`,
+			agentName: name,
+			capability,
+			worktreePath,
+			branchName,
+			beadId: taskId,
+			tmuxSession: tmuxSessionName,
+			state: "booting",
+			pid,
+			parentAgent: parentAgent,
+			depth,
+			runId: null,
+			startedAt: new Date().toISOString(),
+			lastActivity: new Date().toISOString(),
+			escalationLevel: 0,
+			stalledSince: null,
+		};
+
+		store.upsert(session);
+
+		// 12b. Send beacon prompt via tmux send-keys
+		// Allow Claude Code time to initialize its TUI before sending input.
+		// 3s gives the TUI enough time to render and attach its input handler.
+		await Bun.sleep(3_000);
+		const beacon = buildBeacon({
+			agentName: name,
+			capability,
+			taskId,
+			parentAgent,
+			depth,
+		});
+		await sendKeys(tmuxSessionName, beacon);
+
+		// 12c. Send a follow-up Enter after a short delay to ensure submission.
+		// Claude Code's TUI may consume the first Enter during initialization,
+		// leaving the beacon text visible but unsubmitted (overstory-yhv6).
+		// A redundant Enter on an empty input line is harmless.
+		await Bun.sleep(500);
+		await sendKeys(tmuxSessionName, "");
+
+		// 13. Output result
+		const output = {
+			agentName: name,
+			capability,
+			taskId,
+			branch: branchName,
+			worktree: worktreePath,
+			tmuxSession: tmuxSessionName,
+			pid,
+		};
+
+		if (args.includes("--json")) {
+			process.stdout.write(`${JSON.stringify(output)}\n`);
+		} else {
+			process.stdout.write(`🚀 Agent "${name}" launched!\n`);
+			process.stdout.write(`   Task:     ${taskId}\n`);
+			process.stdout.write(`   Branch:   ${branchName}\n`);
+			process.stdout.write(`   Worktree: ${worktreePath}\n`);
+			process.stdout.write(`   Tmux:     ${tmuxSessionName}\n`);
+			process.stdout.write(`   PID:      ${pid}\n`);
+		}
+	} finally {
+		store.close();
 	}
 }

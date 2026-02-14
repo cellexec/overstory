@@ -407,8 +407,16 @@ mail.db-shm
 metrics.db
 metrics.db-wal
 metrics.db-shm
+events.db
+events.db-wal
+events.db-shm
 sessions.json
+sessions.db
+sessions.db-wal
+sessions.db-shm
 merge-queue.json
+nudge-state.json
+pending-nudges/
 agents/
 specs/
 `;

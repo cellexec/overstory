@@ -10,15 +10,19 @@
  *   2. Remove all worktrees
  *   3. Delete orphaned overstory/* branches
  *   4. Delete SQLite databases (mail.db, metrics.db)
- *   5. Reset JSON files (sessions.json, merge-queue.json)
+ *   5. Wipe sessions.db, reset merge-queue.json
  *   6. Clear directory contents (logs/, agents/, specs/)
  *   7. Delete nudge-state.json
  */
 
+import { existsSync } from "node:fs";
 import { readdir, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "../config.ts";
 import { ValidationError } from "../errors.ts";
+import { createEventStore } from "../events/store.ts";
+import { openSessionStore } from "../sessions/compat.ts";
+import type { AgentSession } from "../types.ts";
 import { listWorktrees, removeWorktree } from "../worktree/manager.ts";
 import { killSession, listSessions } from "../worktree/tmux.ts";
 
@@ -26,7 +30,75 @@ function hasFlag(args: string[], flag: string): boolean {
 	return args.includes(flag);
 }
 
+/**
+ * Load active agent sessions from SessionStore for session-end event logging.
+ * Returns sessions that are in an active state (booting, working, stalled).
+ *
+ * Checks for sessions.db or sessions.json existence first to avoid creating
+ * an empty database file as a side effect (which would interfere with
+ * the "Nothing to clean" detection later in the pipeline).
+ */
+function loadActiveSessions(overstoryDir: string): AgentSession[] {
+	try {
+		const dbPath = join(overstoryDir, "sessions.db");
+		const jsonPath = join(overstoryDir, "sessions.json");
+		if (!existsSync(dbPath) && !existsSync(jsonPath)) {
+			return [];
+		}
+		const { store } = openSessionStore(overstoryDir);
+		try {
+			return store.getActive();
+		} finally {
+			store.close();
+		}
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Log synthetic session-end events for all active agents before killing tmux sessions.
+ *
+ * When clean --all or --worktrees kills tmux sessions, the Stop hook never fires
+ * because the process is killed externally. This function writes session_end events
+ * to the EventStore with reason='clean' so observability records are complete.
+ */
+async function logSyntheticSessionEndEvents(overstoryDir: string): Promise<number> {
+	let logged = 0;
+	try {
+		const activeSessions = loadActiveSessions(overstoryDir);
+		if (activeSessions.length === 0) {
+			return 0;
+		}
+
+		const eventsDbPath = join(overstoryDir, "events.db");
+		const eventStore = createEventStore(eventsDbPath);
+		try {
+			for (const session of activeSessions) {
+				eventStore.insert({
+					runId: session.runId,
+					agentName: session.agentName,
+					sessionId: session.id,
+					eventType: "session_end",
+					toolName: null,
+					toolArgs: null,
+					toolDurationMs: null,
+					level: "info",
+					data: JSON.stringify({ reason: "clean", capability: session.capability }),
+				});
+				logged++;
+			}
+		} finally {
+			eventStore.close();
+		}
+	} catch {
+		// Best effort: event logging should not block cleanup
+	}
+	return logged;
+}
+
 interface CleanResult {
+	sessionEndEventsLogged: number;
 	tmuxKilled: number;
 	worktreesCleaned: number;
 	branchesDeleted: number;
@@ -184,7 +256,7 @@ Usage: overstory clean [flags]
 Flags:
   --all           Wipe everything (nuclear option)
   --mail          Delete mail.db (all messages)
-  --sessions      Reset sessions.json
+  --sessions      Wipe sessions.db
   --metrics       Delete metrics.db
   --logs          Remove all agent logs
   --worktrees     Remove all worktrees + kill tmux sessions
@@ -200,7 +272,7 @@ When --all is passed, ALL of the above are executed in safe order:
   1. Kill all overstory tmux sessions (processes first)
   2. Remove all worktrees
   3. Delete orphaned branch refs
-  4. Wipe mail.db, metrics.db, sessions.json, merge-queue.json
+  4. Wipe mail.db, metrics.db, sessions.db, merge-queue.json
   5. Clear logs, agents, specs, nudge state`;
 
 export async function cleanCommand(args: string[]): Promise<void> {
@@ -236,6 +308,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	const overstoryDir = join(root, ".overstory");
 
 	const result: CleanResult = {
+		sessionEndEventsLogged: 0,
 		tmuxKilled: 0,
 		worktreesCleaned: 0,
 		branchesDeleted: 0,
@@ -248,6 +321,13 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		specsCleared: false,
 		nudgeStateCleared: false,
 	};
+
+	// 0. Log synthetic session-end events BEFORE killing tmux sessions.
+	// When processes are killed externally, the Stop hook never fires,
+	// so session_end events would be lost without this step.
+	if (doWorktrees || all) {
+		result.sessionEndEventsLogged = await logSyntheticSessionEndEvents(overstoryDir);
+	}
 
 	// 1. Kill tmux sessions (must happen before worktree removal)
 	if (doWorktrees || all) {
@@ -272,9 +352,11 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		result.metricsWiped = await wipeSqliteDb(join(overstoryDir, "metrics.db"));
 	}
 
-	// 5. Reset JSON files
+	// 5. Wipe sessions.db + legacy sessions.json
 	if (doSessions) {
-		result.sessionsCleared = await resetJsonFile(join(overstoryDir, "sessions.json"));
+		result.sessionsCleared = await wipeSqliteDb(join(overstoryDir, "sessions.db"));
+		// Also clean legacy sessions.json if it still exists
+		await resetJsonFile(join(overstoryDir, "sessions.json"));
 	}
 	if (all) {
 		result.mergeQueueCleared = await resetJsonFile(join(overstoryDir, "merge-queue.json"));
@@ -291,9 +373,10 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		result.specsCleared = await clearDirectory(join(overstoryDir, "specs"));
 	}
 
-	// 7. Delete nudge state
+	// 7. Delete nudge state + pending nudge markers
 	if (all) {
 		result.nudgeStateCleared = await deleteFile(join(overstoryDir, "nudge-state.json"));
+		await clearDirectory(join(overstoryDir, "pending-nudges"));
 	}
 
 	// Output
@@ -303,6 +386,11 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	}
 
 	const lines: string[] = [];
+	if (result.sessionEndEventsLogged > 0) {
+		lines.push(
+			`Logged ${result.sessionEndEventsLogged} synthetic session-end event${result.sessionEndEventsLogged === 1 ? "" : "s"}`,
+		);
+	}
 	if (result.tmuxKilled > 0) {
 		lines.push(`Killed ${result.tmuxKilled} tmux session${result.tmuxKilled === 1 ? "" : "s"}`);
 	}
@@ -318,7 +406,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	}
 	if (result.mailWiped) lines.push("Wiped mail.db");
 	if (result.metricsWiped) lines.push("Wiped metrics.db");
-	if (result.sessionsCleared) lines.push("Reset sessions.json");
+	if (result.sessionsCleared) lines.push("Wiped sessions.db");
 	if (result.mergeQueueCleared) lines.push("Reset merge-queue.json");
 	if (result.logsCleared) lines.push("Cleared logs/");
 	if (result.agentsCleared) lines.push("Cleared agents/");

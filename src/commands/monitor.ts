@@ -19,6 +19,7 @@ import { deployHooks } from "../agents/hooks-deployer.ts";
 import { createIdentity, loadIdentity } from "../agents/identity.ts";
 import { loadConfig } from "../config.ts";
 import { AgentError, ValidationError } from "../errors.ts";
+import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
 import { createSession, isSessionAlive, killSession, sendKeys } from "../worktree/tmux.ts";
 
@@ -27,42 +28,6 @@ const MONITOR_NAME = "monitor";
 
 /** Tmux session name for the monitor. */
 const TMUX_SESSION = `overstory-${MONITOR_NAME}`;
-
-/**
- * Load sessions registry from .overstory/sessions.json.
- */
-async function loadSessions(sessionsPath: string): Promise<AgentSession[]> {
-	const file = Bun.file(sessionsPath);
-	if (!(await file.exists())) {
-		return [];
-	}
-	try {
-		const text = await file.text();
-		return JSON.parse(text) as AgentSession[];
-	} catch {
-		return [];
-	}
-}
-
-/**
- * Save sessions registry to .overstory/sessions.json.
- */
-async function saveSessions(sessionsPath: string, sessions: AgentSession[]): Promise<void> {
-	await Bun.write(sessionsPath, `${JSON.stringify(sessions, null, "\t")}\n`);
-}
-
-/**
- * Find the active monitor session (if any).
- */
-function findMonitorSession(sessions: AgentSession[]): AgentSession | undefined {
-	return sessions.find(
-		(s) =>
-			s.agentName === MONITOR_NAME &&
-			s.capability === "monitor" &&
-			s.state !== "completed" &&
-			s.state !== "zombie",
-	);
-}
 
 /**
  * Build the monitor startup beacon — the first message sent to the monitor
@@ -96,7 +61,7 @@ function resolveAttach(args: string[], isTTY: boolean): boolean {
  * 4. Create agent identity (if first time)
  * 5. Spawn tmux session at project root with Claude Code
  * 6. Send startup beacon
- * 7. Record session in sessions.json
+ * 7. Record session in SessionStore (sessions.db)
  */
 async function startMonitor(args: string[]): Promise<void> {
 	const json = args.includes("--json");
@@ -106,111 +71,118 @@ async function startMonitor(args: string[]): Promise<void> {
 	const projectRoot = config.project.root;
 
 	// Check for existing monitor
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const sessions = await loadSessions(sessionsPath);
-	const existing = findMonitorSession(sessions);
+	const overstoryDir = join(projectRoot, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
+	try {
+		const existing = store.getByName(MONITOR_NAME);
 
-	if (existing) {
-		const alive = await isSessionAlive(existing.tmuxSession);
-		if (alive) {
-			throw new AgentError(
-				`Monitor is already running (tmux: ${existing.tmuxSession}, since: ${existing.startedAt})`,
-				{ agentName: MONITOR_NAME },
-			);
+		if (
+			existing &&
+			existing.capability === "monitor" &&
+			existing.state !== "completed" &&
+			existing.state !== "zombie"
+		) {
+			const alive = await isSessionAlive(existing.tmuxSession);
+			if (alive) {
+				throw new AgentError(
+					`Monitor is already running (tmux: ${existing.tmuxSession}, since: ${existing.startedAt})`,
+					{ agentName: MONITOR_NAME },
+				);
+			}
+			// Session recorded but tmux is dead — mark as completed and continue
+			store.updateState(MONITOR_NAME, "completed");
 		}
-		// Session recorded but tmux is dead — mark as completed and continue
-		existing.state = "completed";
-		await saveSessions(sessionsPath, sessions);
-	}
 
-	// Deploy monitor-specific hooks to the project root's .claude/ directory.
-	// The monitor gets the same structural enforcement as other non-implementation
-	// agents (Write/Edit/NotebookEdit blocked, dangerous bash commands blocked).
-	await deployHooks(projectRoot, MONITOR_NAME, "monitor");
+		// Deploy monitor-specific hooks to the project root's .claude/ directory.
+		// The monitor gets the same structural enforcement as other non-implementation
+		// agents (Write/Edit/NotebookEdit blocked, dangerous bash commands blocked).
+		await deployHooks(projectRoot, MONITOR_NAME, "monitor");
 
-	// Create monitor identity if first run
-	const identityBaseDir = join(projectRoot, ".overstory", "agents");
-	await mkdir(identityBaseDir, { recursive: true });
-	const existingIdentity = await loadIdentity(identityBaseDir, MONITOR_NAME);
-	if (!existingIdentity) {
-		await createIdentity(identityBaseDir, {
-			name: MONITOR_NAME,
+		// Create monitor identity if first run
+		const identityBaseDir = join(projectRoot, ".overstory", "agents");
+		await mkdir(identityBaseDir, { recursive: true });
+		const existingIdentity = await loadIdentity(identityBaseDir, MONITOR_NAME);
+		if (!existingIdentity) {
+			await createIdentity(identityBaseDir, {
+				name: MONITOR_NAME,
+				capability: "monitor",
+				created: new Date().toISOString(),
+				sessionsCompleted: 0,
+				expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
+				recentTasks: [],
+			});
+		}
+
+		// Spawn tmux session at project root with Claude Code (interactive mode).
+		// Inject the monitor base definition via --append-system-prompt.
+		const agentDefPath = join(projectRoot, ".overstory", "agent-defs", "monitor.md");
+		const agentDefFile = Bun.file(agentDefPath);
+		let claudeCmd = "claude --model sonnet --dangerously-skip-permissions";
+		if (await agentDefFile.exists()) {
+			const agentDef = await agentDefFile.text();
+			const escaped = agentDef.replace(/'/g, "'\\''");
+			claudeCmd += ` --append-system-prompt '${escaped}'`;
+		}
+		const pid = await createSession(TMUX_SESSION, projectRoot, claudeCmd, {
+			OVERSTORY_AGENT_NAME: MONITOR_NAME,
+		});
+
+		// Record session BEFORE sending the beacon so that hook-triggered
+		// updateLastActivity() can find the entry and transition booting->working.
+		const session: AgentSession = {
+			id: `session-${Date.now()}-${MONITOR_NAME}`,
+			agentName: MONITOR_NAME,
 			capability: "monitor",
-			created: new Date().toISOString(),
-			sessionsCompleted: 0,
-			expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
-			recentTasks: [],
-		});
-	}
+			worktreePath: projectRoot, // Monitor uses project root, not a worktree
+			branchName: config.project.canonicalBranch, // Operates on canonical branch
+			beadId: "", // No specific bead assignment
+			tmuxSession: TMUX_SESSION,
+			state: "booting",
+			pid,
+			parentAgent: null, // Top of hierarchy (alongside coordinator)
+			depth: 0,
+			runId: null,
+			startedAt: new Date().toISOString(),
+			lastActivity: new Date().toISOString(),
+			escalationLevel: 0,
+			stalledSince: null,
+		};
 
-	// Spawn tmux session at project root with Claude Code (interactive mode).
-	// Inject the monitor base definition via --append-system-prompt.
-	const agentDefPath = join(projectRoot, ".overstory", "agent-defs", "monitor.md");
-	const agentDefFile = Bun.file(agentDefPath);
-	let claudeCmd = "claude --model sonnet --dangerously-skip-permissions";
-	if (await agentDefFile.exists()) {
-		const agentDef = await agentDefFile.text();
-		const escaped = agentDef.replace(/'/g, "'\\''");
-		claudeCmd += ` --append-system-prompt '${escaped}'`;
-	}
-	const pid = await createSession(TMUX_SESSION, projectRoot, claudeCmd, {
-		OVERSTORY_AGENT_NAME: MONITOR_NAME,
-	});
+		store.upsert(session);
 
-	// Record session BEFORE sending the beacon so that hook-triggered
-	// updateLastActivity() can find the entry and transition booting->working.
-	const session: AgentSession = {
-		id: `session-${Date.now()}-${MONITOR_NAME}`,
-		agentName: MONITOR_NAME,
-		capability: "monitor",
-		worktreePath: projectRoot, // Monitor uses project root, not a worktree
-		branchName: config.project.canonicalBranch, // Operates on canonical branch
-		beadId: "", // No specific bead assignment
-		tmuxSession: TMUX_SESSION,
-		state: "booting",
-		pid,
-		parentAgent: null, // Top of hierarchy (alongside coordinator)
-		depth: 0,
-		runId: null,
-		startedAt: new Date().toISOString(),
-		lastActivity: new Date().toISOString(),
-		escalationLevel: 0,
-		stalledSince: null,
-	};
+		// Send beacon after TUI initialization delay
+		await Bun.sleep(3_000);
+		const beacon = buildMonitorBeacon();
+		await sendKeys(TMUX_SESSION, beacon);
 
-	sessions.push(session);
-	await saveSessions(sessionsPath, sessions);
+		// Follow-up Enter to ensure submission (same pattern as sling.ts)
+		await Bun.sleep(500);
+		await sendKeys(TMUX_SESSION, "");
 
-	// Send beacon after TUI initialization delay
-	await Bun.sleep(3_000);
-	const beacon = buildMonitorBeacon();
-	await sendKeys(TMUX_SESSION, beacon);
+		const output = {
+			agentName: MONITOR_NAME,
+			capability: "monitor",
+			tmuxSession: TMUX_SESSION,
+			projectRoot,
+			pid,
+		};
 
-	// Follow-up Enter to ensure submission (same pattern as sling.ts)
-	await Bun.sleep(500);
-	await sendKeys(TMUX_SESSION, "");
+		if (json) {
+			process.stdout.write(`${JSON.stringify(output)}\n`);
+		} else {
+			process.stdout.write("Monitor started\n");
+			process.stdout.write(`  Tmux:    ${TMUX_SESSION}\n`);
+			process.stdout.write(`  Root:    ${projectRoot}\n`);
+			process.stdout.write(`  PID:     ${pid}\n`);
+		}
 
-	const output = {
-		agentName: MONITOR_NAME,
-		capability: "monitor",
-		tmuxSession: TMUX_SESSION,
-		projectRoot,
-		pid,
-	};
-
-	if (json) {
-		process.stdout.write(`${JSON.stringify(output)}\n`);
-	} else {
-		process.stdout.write("Monitor started\n");
-		process.stdout.write(`  Tmux:    ${TMUX_SESSION}\n`);
-		process.stdout.write(`  Root:    ${projectRoot}\n`);
-		process.stdout.write(`  PID:     ${pid}\n`);
-	}
-
-	if (shouldAttach) {
-		Bun.spawnSync(["tmux", "attach-session", "-t", TMUX_SESSION], {
-			stdio: ["inherit", "inherit", "inherit"],
-		});
+		if (shouldAttach) {
+			Bun.spawnSync(["tmux", "attach-session", "-t", TMUX_SESSION], {
+				stdio: ["inherit", "inherit", "inherit"],
+			});
+		}
+	} finally {
+		store.close();
 	}
 }
 
@@ -219,7 +191,7 @@ async function startMonitor(args: string[]): Promise<void> {
  *
  * 1. Find the active monitor session
  * 2. Kill the tmux session (with process tree cleanup)
- * 3. Mark session as completed in sessions.json
+ * 3. Mark session as completed in SessionStore
  */
 async function stopMonitor(args: string[]): Promise<void> {
 	const json = args.includes("--json");
@@ -227,31 +199,39 @@ async function stopMonitor(args: string[]): Promise<void> {
 	const config = await loadConfig(cwd);
 	const projectRoot = config.project.root;
 
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const sessions = await loadSessions(sessionsPath);
-	const session = findMonitorSession(sessions);
+	const overstoryDir = join(projectRoot, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
+	try {
+		const session = store.getByName(MONITOR_NAME);
 
-	if (!session) {
-		throw new AgentError("No active monitor session found", {
-			agentName: MONITOR_NAME,
-		});
-	}
+		if (
+			!session ||
+			session.capability !== "monitor" ||
+			session.state === "completed" ||
+			session.state === "zombie"
+		) {
+			throw new AgentError("No active monitor session found", {
+				agentName: MONITOR_NAME,
+			});
+		}
 
-	// Kill tmux session with process tree cleanup
-	const alive = await isSessionAlive(session.tmuxSession);
-	if (alive) {
-		await killSession(session.tmuxSession);
-	}
+		// Kill tmux session with process tree cleanup
+		const alive = await isSessionAlive(session.tmuxSession);
+		if (alive) {
+			await killSession(session.tmuxSession);
+		}
 
-	// Update session state
-	session.state = "completed";
-	session.lastActivity = new Date().toISOString();
-	await saveSessions(sessionsPath, sessions);
+		// Update session state
+		store.updateState(MONITOR_NAME, "completed");
+		store.updateLastActivity(MONITOR_NAME);
 
-	if (json) {
-		process.stdout.write(`${JSON.stringify({ stopped: true, sessionId: session.id })}\n`);
-	} else {
-		process.stdout.write(`Monitor stopped (session: ${session.id})\n`);
+		if (json) {
+			process.stdout.write(`${JSON.stringify({ stopped: true, sessionId: session.id })}\n`);
+		} else {
+			process.stdout.write(`Monitor stopped (session: ${session.id})\n`);
+		}
+	} finally {
+		store.close();
 	}
 }
 
@@ -266,48 +246,59 @@ async function statusMonitor(args: string[]): Promise<void> {
 	const config = await loadConfig(cwd);
 	const projectRoot = config.project.root;
 
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const sessions = await loadSessions(sessionsPath);
-	const session = findMonitorSession(sessions);
+	const overstoryDir = join(projectRoot, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
+	try {
+		const session = store.getByName(MONITOR_NAME);
 
-	if (!session) {
-		if (json) {
-			process.stdout.write(`${JSON.stringify({ running: false })}\n`);
-		} else {
-			process.stdout.write("Monitor is not running\n");
+		if (
+			!session ||
+			session.capability !== "monitor" ||
+			session.state === "completed" ||
+			session.state === "zombie"
+		) {
+			if (json) {
+				process.stdout.write(`${JSON.stringify({ running: false })}\n`);
+			} else {
+				process.stdout.write("Monitor is not running\n");
+			}
+			return;
 		}
-		return;
-	}
 
-	const alive = await isSessionAlive(session.tmuxSession);
+		const alive = await isSessionAlive(session.tmuxSession);
 
-	// Reconcile state: if session says active but tmux is dead, update
-	if (!alive && session.state !== "completed" && session.state !== "zombie") {
-		session.state = "zombie";
-		session.lastActivity = new Date().toISOString();
-		await saveSessions(sessionsPath, sessions);
-	}
+		// Reconcile state: if session says active but tmux is dead, update.
+		// We already filtered out completed/zombie states above, so if tmux is dead
+		// this session needs to be marked as zombie.
+		if (!alive) {
+			store.updateState(MONITOR_NAME, "zombie");
+			store.updateLastActivity(MONITOR_NAME);
+			session.state = "zombie";
+		}
 
-	const status = {
-		running: alive,
-		sessionId: session.id,
-		state: session.state,
-		tmuxSession: session.tmuxSession,
-		pid: session.pid,
-		startedAt: session.startedAt,
-		lastActivity: session.lastActivity,
-	};
+		const status = {
+			running: alive,
+			sessionId: session.id,
+			state: session.state,
+			tmuxSession: session.tmuxSession,
+			pid: session.pid,
+			startedAt: session.startedAt,
+			lastActivity: session.lastActivity,
+		};
 
-	if (json) {
-		process.stdout.write(`${JSON.stringify(status)}\n`);
-	} else {
-		const stateLabel = alive ? "running" : session.state;
-		process.stdout.write(`Monitor: ${stateLabel}\n`);
-		process.stdout.write(`  Session:   ${session.id}\n`);
-		process.stdout.write(`  Tmux:      ${session.tmuxSession}\n`);
-		process.stdout.write(`  PID:       ${session.pid}\n`);
-		process.stdout.write(`  Started:   ${session.startedAt}\n`);
-		process.stdout.write(`  Activity:  ${session.lastActivity}\n`);
+		if (json) {
+			process.stdout.write(`${JSON.stringify(status)}\n`);
+		} else {
+			const stateLabel = alive ? "running" : session.state;
+			process.stdout.write(`Monitor: ${stateLabel}\n`);
+			process.stdout.write(`  Session:   ${session.id}\n`);
+			process.stdout.write(`  Tmux:      ${session.tmuxSession}\n`);
+			process.stdout.write(`  PID:       ${session.pid}\n`);
+			process.stdout.write(`  Started:   ${session.startedAt}\n`);
+			process.stdout.write(`  Activity:  ${session.lastActivity}\n`);
+		}
+	} finally {
+		store.close();
 	}
 }
 

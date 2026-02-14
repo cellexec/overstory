@@ -11,7 +11,7 @@
 
 import { join } from "node:path";
 import { AgentError, ValidationError } from "../errors.ts";
-import type { AgentSession } from "../types.ts";
+import { openSessionStore } from "../sessions/compat.ts";
 import { isSessionAlive, sendKeys } from "../worktree/tmux.ts";
 
 const DEFAULT_MESSAGE = "Check your mail inbox for new messages.";
@@ -58,28 +58,11 @@ function getPositionalArgs(args: string[]): string[] {
 }
 
 /**
- * Load agent sessions from .overstory/sessions.json.
- */
-async function loadSessions(projectRoot: string): Promise<AgentSession[]> {
-	const sessionsPath = join(projectRoot, ".overstory", "sessions.json");
-	const file = Bun.file(sessionsPath);
-	if (!(await file.exists())) {
-		return [];
-	}
-	try {
-		const text = await file.text();
-		return JSON.parse(text) as AgentSession[];
-	} catch {
-		return [];
-	}
-}
-
-/**
  * Load the orchestrator's registered tmux session name.
  *
  * Written by `overstory prime` at SessionStart when the orchestrator
  * is running inside tmux. Enables agents to nudge the orchestrator
- * even though it's not tracked in sessions.json.
+ * even though it's not tracked in the SessionStore.
  */
 async function loadOrchestratorTmuxSession(projectRoot: string): Promise<string | null> {
 	const regPath = join(projectRoot, ".overstory", "orchestrator-tmux.json");
@@ -99,7 +82,7 @@ async function loadOrchestratorTmuxSession(projectRoot: string): Promise<string 
 /**
  * Resolve the tmux session name for an agent.
  *
- * For regular agents, looks up sessions.json.
+ * For regular agents, looks up the SessionStore.
  * For "orchestrator", falls back to the orchestrator-tmux.json registration
  * file written by `overstory prime`.
  */
@@ -107,12 +90,15 @@ async function resolveTargetSession(
 	projectRoot: string,
 	agentName: string,
 ): Promise<string | null> {
-	const sessions = await loadSessions(projectRoot);
-	const session = sessions.find(
-		(s) => s.agentName === agentName && s.state !== "zombie" && s.state !== "completed",
-	);
-	if (session) {
-		return session.tmuxSession;
+	const overstoryDir = join(projectRoot, ".overstory");
+	const { store } = openSessionStore(overstoryDir);
+	try {
+		const session = store.getByName(agentName);
+		if (session && session.state !== "zombie" && session.state !== "completed") {
+			return session.tmuxSession;
+		}
+	} finally {
+		store.close();
 	}
 
 	// Fallback for orchestrator: check orchestrator-tmux.json
@@ -205,7 +191,7 @@ export async function nudgeAgent(
 	message: string = DEFAULT_MESSAGE,
 	force = false,
 ): Promise<{ delivered: boolean; reason?: string }> {
-	// Resolve tmux session (sessions.json for agents, orchestrator-tmux.json for orchestrator)
+	// Resolve tmux session (SessionStore for agents, orchestrator-tmux.json for orchestrator)
 	const tmuxSessionName = await resolveTargetSession(projectRoot, agentName);
 
 	if (!tmuxSessionName) {
