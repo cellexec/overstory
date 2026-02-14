@@ -466,35 +466,90 @@ export interface MulchStatus {
 
 /** Result from mulch diff command. */
 export interface MulchDiffResult {
-	domain1: string;
-	domain2: string;
-	differences: string[];
+	success: boolean;
+	command: string;
+	since: string;
+	domains: string[];
+	message: string;
+}
+
+/** Result from mulch learn command. */
+export interface MulchLearnResult {
+	success: boolean;
+	command: string;
+	changedFiles: string[];
+	suggestedDomains: string[];
+	unmatchedFiles: string[];
 }
 
 /** Result from mulch prune command. */
 export interface MulchPruneResult {
-	domain: string;
-	removedCount: number;
-	removedRecords: string[];
+	success: boolean;
+	command: string;
+	dryRun: boolean;
+	totalPruned: number;
+	results: Array<{
+		domain: string;
+		pruned: number;
+		records: string[];
+	}>;
 }
 
 /** Health check result from mulch doctor. */
 export interface MulchDoctorResult {
-	healthy: boolean;
-	issues: Array<{
-		severity: "error" | "warning" | "info";
+	success: boolean;
+	command: string;
+	checks: Array<{
+		name: string;
+		status: "pass" | "warn" | "fail";
 		message: string;
-		domain?: string;
+		fixable: boolean;
+		details: string[];
+	}>;
+	summary: {
+		pass: number;
+		warn: number;
+		fail: number;
+	};
+}
+
+/** Ready records result from mulch ready. */
+export interface MulchReadyResult {
+	success: boolean;
+	command: string;
+	count: number;
+	entries: Array<{
+		domain: string;
+		id: string;
+		type: string;
+		recorded_at: string;
+		summary: string;
+		record: Record<string, unknown>;
 	}>;
 }
 
-/** Ready domains result from mulch ready. */
-export interface MulchReadyResult {
-	ready: string[];
-	notReady: Array<{
+/** Result from mulch compact command. */
+export interface MulchCompactResult {
+	success: boolean;
+	command: string;
+	action: string;
+	candidates?: Array<{
 		domain: string;
-		reason: string;
+		type: string;
+		records: Array<{
+			id: string;
+			summary: string;
+			recorded_at: string;
+		}>;
 	}>;
+	compacted?: Array<{
+		domain: string;
+		type: string;
+		before: number;
+		after: number;
+		recordIds: string[];
+	}>;
+	message?: string;
 }
 
 // === Session Lifecycle (Checkpoint / Handoff / Continuity) ===

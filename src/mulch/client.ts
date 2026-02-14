@@ -6,7 +6,15 @@
  */
 
 import { AgentError } from "../errors.ts";
-import type { MulchStatus } from "../types.ts";
+import type {
+	MulchCompactResult,
+	MulchDiffResult,
+	MulchDoctorResult,
+	MulchLearnResult,
+	MulchPruneResult,
+	MulchReadyResult,
+	MulchStatus,
+} from "../types.ts";
 
 export interface MulchClient {
 	/** Generate a priming prompt, optionally scoped to specific domains. */
@@ -45,19 +53,19 @@ export interface MulchClient {
 	search(query: string): Promise<string>;
 
 	/** Show expertise record changes since a git ref. */
-	diff(options?: { since?: string }): Promise<string>;
+	diff(options?: { since?: string }): Promise<MulchDiffResult>;
 
 	/** Show changed files and suggest domains for recording learnings. */
-	learn(options?: { since?: string }): Promise<string>;
+	learn(options?: { since?: string }): Promise<MulchLearnResult>;
 
 	/** Remove unused or stale records. */
-	prune(options?: { dryRun?: boolean }): Promise<string>;
+	prune(options?: { dryRun?: boolean }): Promise<MulchPruneResult>;
 
 	/** Run health checks on mulch repository. */
-	doctor(options?: { fix?: boolean }): Promise<string>;
+	doctor(options?: { fix?: boolean }): Promise<MulchDoctorResult>;
 
 	/** Show recently added or updated expertise records. */
-	ready(options?: { limit?: number; domain?: string; since?: string }): Promise<string>;
+	ready(options?: { limit?: number; domain?: string; since?: string }): Promise<MulchReadyResult>;
 
 	/** Compact and optimize domain storage. */
 	compact(
@@ -72,7 +80,7 @@ export interface MulchClient {
 			yes?: boolean;
 			records?: string[];
 		},
-	): Promise<string>;
+	): Promise<MulchCompactResult>;
 }
 
 /**
@@ -121,10 +129,10 @@ export function createMulchClient(cwd: string): MulchClient {
 				args.push("--format", format);
 			}
 			if (options?.files && options.files.length > 0) {
-				args.push("--files", options.files.join(","));
+				args.push("--files", ...options.files);
 			}
 			if (options?.excludeDomain && options.excludeDomain.length > 0) {
-				args.push("--exclude-domain", options.excludeDomain.join(","));
+				args.push("--exclude-domain", ...options.excludeDomain);
 			}
 			const { stdout } = await runMulch(args, "prime");
 			return stdout;
@@ -189,43 +197,63 @@ export function createMulchClient(cwd: string): MulchClient {
 		},
 
 		async diff(options) {
-			const args = ["diff"];
+			const args = ["diff", "--json"];
 			if (options?.since) {
 				args.push("--since", options.since);
 			}
 			const { stdout } = await runMulch(args, "diff");
-			return stdout;
+			const trimmed = stdout.trim();
+			try {
+				return JSON.parse(trimmed) as MulchDiffResult;
+			} catch {
+				throw new AgentError(`Failed to parse JSON from mulch diff: ${trimmed.slice(0, 200)}`);
+			}
 		},
 
 		async learn(options) {
-			const args = ["learn"];
+			const args = ["learn", "--json"];
 			if (options?.since) {
 				args.push("--since", options.since);
 			}
 			const { stdout } = await runMulch(args, "learn");
-			return stdout;
+			const trimmed = stdout.trim();
+			try {
+				return JSON.parse(trimmed) as MulchLearnResult;
+			} catch {
+				throw new AgentError(`Failed to parse JSON from mulch learn: ${trimmed.slice(0, 200)}`);
+			}
 		},
 
 		async prune(options) {
-			const args = ["prune"];
+			const args = ["prune", "--json"];
 			if (options?.dryRun) {
 				args.push("--dry-run");
 			}
 			const { stdout } = await runMulch(args, "prune");
-			return stdout;
+			const trimmed = stdout.trim();
+			try {
+				return JSON.parse(trimmed) as MulchPruneResult;
+			} catch {
+				throw new AgentError(`Failed to parse JSON from mulch prune: ${trimmed.slice(0, 200)}`);
+			}
 		},
 
 		async doctor(options) {
-			const args = ["doctor"];
+			const args = ["doctor", "--json"];
 			if (options?.fix) {
 				args.push("--fix");
 			}
 			const { stdout } = await runMulch(args, "doctor");
-			return stdout;
+			const trimmed = stdout.trim();
+			try {
+				return JSON.parse(trimmed) as MulchDoctorResult;
+			} catch {
+				throw new AgentError(`Failed to parse JSON from mulch doctor: ${trimmed.slice(0, 200)}`);
+			}
 		},
 
 		async ready(options) {
-			const args = ["ready"];
+			const args = ["ready", "--json"];
 			if (options?.limit !== undefined) {
 				args.push("--limit", String(options.limit));
 			}
@@ -236,11 +264,16 @@ export function createMulchClient(cwd: string): MulchClient {
 				args.push("--since", options.since);
 			}
 			const { stdout } = await runMulch(args, "ready");
-			return stdout;
+			const trimmed = stdout.trim();
+			try {
+				return JSON.parse(trimmed) as MulchReadyResult;
+			} catch {
+				throw new AgentError(`Failed to parse JSON from mulch ready: ${trimmed.slice(0, 200)}`);
+			}
 		},
 
 		async compact(domain, options) {
-			const args = ["compact"];
+			const args = ["compact", "--json"];
 			if (domain) {
 				args.push(domain);
 			}
@@ -269,7 +302,12 @@ export function createMulchClient(cwd: string): MulchClient {
 				args.push("--records", options.records.join(","));
 			}
 			const { stdout } = await runMulch(args, domain ? `compact ${domain}` : "compact");
-			return stdout;
+			const trimmed = stdout.trim();
+			try {
+				return JSON.parse(trimmed) as MulchCompactResult;
+			} catch {
+				throw new AgentError(`Failed to parse JSON from mulch compact: ${trimmed.slice(0, 200)}`);
+			}
 		},
 	};
 }

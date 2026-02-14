@@ -368,7 +368,10 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.diff();
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
+			expect(result).toHaveProperty("domains");
+			expect(Array.isArray(result.domains)).toBe(true);
 		});
 
 		test.skipIf(!hasMulch)("passes --since flag", async () => {
@@ -376,7 +379,8 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.diff({ since: "HEAD~5" });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("since");
 		});
 	});
 
@@ -386,7 +390,10 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.learn();
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
+			expect(result).toHaveProperty("changedFiles");
+			expect(Array.isArray(result.changedFiles)).toBe(true);
 		});
 
 		test.skipIf(!hasMulch)("passes --since flag", async () => {
@@ -394,7 +401,8 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.learn({ since: "HEAD~3" });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("changedFiles");
 		});
 	});
 
@@ -403,14 +411,18 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.prune();
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
+			expect(result).toHaveProperty("totalPruned");
 		});
 
 		test.skipIf(!hasMulch)("supports --dry-run flag", async () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.prune({ dryRun: true });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("dryRun");
+			expect(result.dryRun).toBe(true);
 		});
 	});
 
@@ -419,14 +431,18 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.doctor();
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
+			expect(result).toHaveProperty("checks");
+			expect(Array.isArray(result.checks)).toBe(true);
 		});
 
 		test.skipIf(!hasMulch)("passes --fix flag", async () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.doctor({ fix: true });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("checks");
 		});
 	});
 
@@ -435,14 +451,18 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.ready();
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
+			expect(result).toHaveProperty("entries");
+			expect(Array.isArray(result.entries)).toBe(true);
 		});
 
 		test.skipIf(!hasMulch)("passes --limit flag", async () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.ready({ limit: 5 });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("count");
 		});
 
 		test.skipIf(!hasMulch)("passes --domain flag", async () => {
@@ -456,14 +476,16 @@ describe("createMulchClient", () => {
 
 			const client = createMulchClient(tempDir);
 			const result = await client.ready({ domain: "testing" });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("entries");
 		});
 
 		test.skipIf(!hasMulch)("passes --since flag", async () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.ready({ since: "7d" });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("entries");
 		});
 	});
 
@@ -472,7 +494,9 @@ describe("createMulchClient", () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.compact(undefined, { analyze: true });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
+			expect(result).toHaveProperty("action");
 		});
 
 		test.skipIf(!hasMulch)("compacts specific domain with --analyze", async () => {
@@ -486,14 +510,16 @@ describe("createMulchClient", () => {
 
 			const client = createMulchClient(tempDir);
 			const result = await client.compact("large", { analyze: true });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("action");
 		});
 
 		test.skipIf(!hasMulch)("passes --auto with --dry-run flags", async () => {
 			await initMulch();
 			const client = createMulchClient(tempDir);
 			const result = await client.compact(undefined, { auto: true, dryRun: true });
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
 		});
 
 		test.skipIf(!hasMulch)("passes multiple options", async () => {
@@ -505,7 +531,8 @@ describe("createMulchClient", () => {
 				minGroup: 3,
 				maxRecords: 20,
 			});
-			expect(typeof result).toBe("string");
+			expect(result).toHaveProperty("success");
+			expect(result).toHaveProperty("command");
 		});
 	});
 
