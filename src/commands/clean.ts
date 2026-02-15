@@ -6,6 +6,10 @@
  * --all does everything. Individual flags allow selective cleanup.
  *
  * Execution order for --all (processes → filesystem → databases):
+ *   0. Run mulch health checks (informational, non-destructive):
+ *      - Check domains approaching governance limits
+ *      - Run mulch prune --dry-run (report stale record counts)
+ *      - Run mulch doctor (report health issues)
  *   1. Kill all overstory tmux sessions
  *   2. Remove all worktrees
  *   3. Delete orphaned overstory/* branches
@@ -21,8 +25,9 @@ import { join } from "node:path";
 import { loadConfig } from "../config.ts";
 import { ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
+import { createMulchClient } from "../mulch/client.ts";
 import { openSessionStore } from "../sessions/compat.ts";
-import type { AgentSession } from "../types.ts";
+import type { AgentSession, MulchDoctorResult, MulchPruneResult, MulchStatus } from "../types.ts";
 import { listWorktrees, removeWorktree } from "../worktree/manager.ts";
 import { killSession, listSessions } from "../worktree/tmux.ts";
 
@@ -111,6 +116,13 @@ interface CleanResult {
 	specsCleared: boolean;
 	nudgeStateCleared: boolean;
 	currentRunCleared: boolean;
+	mulchHealth: {
+		checked: boolean;
+		domainsNearLimit: Array<{ domain: string; recordCount: number; warnThreshold: number }>;
+		stalePruneCandidates: number;
+		doctorIssues: number;
+		doctorWarnings: number;
+	} | null;
 }
 
 /**
@@ -301,6 +313,79 @@ async function deleteFile(path: string): Promise<boolean> {
 	}
 }
 
+/**
+ * Check mulch repository health and return diagnostic information.
+ *
+ * Governance limits warn threshold (based on mulch defaults):
+ * - Max records per domain: 500 (warn at 400 = 80%)
+ *
+ * This is informational only — no data is modified.
+ */
+async function checkMulchHealth(
+	repoRoot: string,
+): Promise<{
+	domainsNearLimit: Array<{ domain: string; recordCount: number; warnThreshold: number }>;
+	stalePruneCandidates: number;
+	doctorIssues: number;
+	doctorWarnings: number;
+} | null> {
+	try {
+		const mulch = createMulchClient(repoRoot);
+
+		// 1. Check domain sizes against governance limits
+		let status: MulchStatus;
+		try {
+			status = await mulch.status();
+		} catch {
+			// Mulch not available or no .mulch directory
+			return null;
+		}
+
+		const warnThreshold = 400; // 80% of 500 max
+		const domainsNearLimit = status.domains
+			.filter((d) => d.recordCount >= warnThreshold)
+			.map((d) => ({ domain: d.name, recordCount: d.recordCount, warnThreshold }));
+
+		// 2. Run prune --dry-run to count stale records
+		let pruneResult: MulchPruneResult;
+		try {
+			pruneResult = await mulch.prune({ dryRun: true });
+		} catch {
+			// Prune failed — skip this check
+			pruneResult = { success: false, command: "prune", dryRun: true, totalPruned: 0, results: [] };
+		}
+
+		const stalePruneCandidates = pruneResult.totalPruned;
+
+		// 3. Run doctor to check repository health
+		let doctorResult: MulchDoctorResult;
+		try {
+			doctorResult = await mulch.doctor({ fix: false });
+		} catch {
+			// Doctor failed — skip this check
+			doctorResult = {
+				success: false,
+				command: "doctor",
+				checks: [],
+				summary: { pass: 0, warn: 0, fail: 0 },
+			};
+		}
+
+		const doctorIssues = doctorResult.summary.fail;
+		const doctorWarnings = doctorResult.summary.warn;
+
+		return {
+			domainsNearLimit,
+			stalePruneCandidates,
+			doctorIssues,
+			doctorWarnings,
+		};
+	} catch {
+		// Mulch not available or other error — skip health checks
+		return null;
+	}
+}
+
 const CLEAN_HELP = `overstory clean — Wipe runtime state (nuclear cleanup)
 
 Usage: overstory clean [flags]
@@ -321,6 +406,10 @@ Options:
   --help, -h      Show this help
 
 When --all is passed, ALL of the above are executed in safe order:
+  0. Run mulch health checks (informational, non-destructive):
+     - Check domains approaching governance limits (warn threshold: 400 records)
+     - Run mulch prune --dry-run (report stale record counts)
+     - Run mulch doctor (report health issues)
   1. Kill all overstory tmux sessions (processes first)
   2. Remove all worktrees
   3. Delete orphaned branch refs
@@ -373,31 +462,47 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		specsCleared: false,
 		nudgeStateCleared: false,
 		currentRunCleared: false,
+		mulchHealth: null,
 	};
 
-	// 0. Log synthetic session-end events BEFORE killing tmux sessions.
+	// 0. Run mulch health checks BEFORE cleanup operations (when --all is set).
+	// This is informational only — no data is modified.
+	if (all) {
+		const healthCheck = await checkMulchHealth(root);
+		if (healthCheck) {
+			result.mulchHealth = {
+				checked: true,
+				domainsNearLimit: healthCheck.domainsNearLimit,
+				stalePruneCandidates: healthCheck.stalePruneCandidates,
+				doctorIssues: healthCheck.doctorIssues,
+				doctorWarnings: healthCheck.doctorWarnings,
+			};
+		}
+	}
+
+	// 1. Log synthetic session-end events BEFORE killing tmux sessions.
 	// When processes are killed externally, the Stop hook never fires,
 	// so session_end events would be lost without this step.
 	if (doWorktrees || all) {
 		result.sessionEndEventsLogged = await logSyntheticSessionEndEvents(overstoryDir);
 	}
 
-	// 1. Kill tmux sessions (must happen before worktree removal)
+	// 2. Kill tmux sessions (must happen before worktree removal)
 	if (doWorktrees || all) {
 		result.tmuxKilled = await killAllTmuxSessions(overstoryDir, config.project.name);
 	}
 
-	// 2. Remove worktrees
+	// 3. Remove worktrees
 	if (doWorktrees) {
 		result.worktreesCleaned = await cleanAllWorktrees(root);
 	}
 
-	// 3. Delete orphaned branches
+	// 4. Delete orphaned branches
 	if (doBranches) {
 		result.branchesDeleted = await deleteOrphanedBranches(root);
 	}
 
-	// 4. Wipe databases
+	// 5. Wipe databases
 	if (doMail) {
 		result.mailWiped = await wipeSqliteDb(join(overstoryDir, "mail.db"));
 	}
@@ -405,7 +510,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		result.metricsWiped = await wipeSqliteDb(join(overstoryDir, "metrics.db"));
 	}
 
-	// 5. Wipe sessions.db + legacy sessions.json
+	// 6. Wipe sessions.db + legacy sessions.json
 	if (doSessions) {
 		result.sessionsCleared = await wipeSqliteDb(join(overstoryDir, "sessions.db"));
 		// Also clean legacy sessions.json if it still exists
@@ -415,7 +520,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		result.mergeQueueCleared = await resetJsonFile(join(overstoryDir, "merge-queue.json"));
 	}
 
-	// 6. Clear directories
+	// 7. Clear directories
 	if (doLogs) {
 		result.logsCleared = await clearDirectory(join(overstoryDir, "logs"));
 	}
@@ -426,7 +531,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		result.specsCleared = await clearDirectory(join(overstoryDir, "specs"));
 	}
 
-	// 7. Delete nudge state + pending nudge markers + current-run.txt
+	// 8. Delete nudge state + pending nudge markers + current-run.txt
 	if (all) {
 		result.nudgeStateCleared = await deleteFile(join(overstoryDir, "nudge-state.json"));
 		await clearDirectory(join(overstoryDir, "pending-nudges"));
@@ -468,9 +573,45 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	if (result.nudgeStateCleared) lines.push("Cleared nudge-state.json");
 	if (result.currentRunCleared) lines.push("Cleared current-run.txt");
 
+	// Mulch health diagnostics (shown before cleanup results)
+	if (result.mulchHealth?.checked) {
+		const health = result.mulchHealth;
+		const healthLines: string[] = [];
+
+		if (health.domainsNearLimit.length > 0) {
+			healthLines.push("\n⚠️  Mulch domains approaching governance limits:");
+			for (const d of health.domainsNearLimit) {
+				healthLines.push(
+					`   ${d.domain}: ${d.recordCount} records (warn threshold: ${d.warnThreshold})`,
+				);
+			}
+		}
+
+		if (health.stalePruneCandidates > 0) {
+			healthLines.push(
+				`\n📦 Stale records found: ${health.stalePruneCandidates} candidate${health.stalePruneCandidates === 1 ? "" : "s"} (run 'mulch prune' to remove)`,
+			);
+		}
+
+		if (health.doctorWarnings > 0 || health.doctorIssues > 0) {
+			healthLines.push(
+				`\n🩺 Mulch health check: ${health.doctorWarnings} warning${health.doctorWarnings === 1 ? "" : "s"}, ${health.doctorIssues} issue${health.doctorIssues === 1 ? "" : "s"} (run 'mulch doctor' for details)`,
+			);
+		}
+
+		if (healthLines.length > 0) {
+			for (const line of healthLines) {
+				process.stdout.write(`${line}\n`);
+			}
+		}
+	}
+
 	if (lines.length === 0) {
 		process.stdout.write("Nothing to clean.\n");
 	} else {
+		if (result.mulchHealth?.checked) {
+			process.stdout.write("\n--- Cleanup Results ---\n");
+		}
 		for (const line of lines) {
 			process.stdout.write(`${line}\n`);
 		}
