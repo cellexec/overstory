@@ -62,5 +62,17 @@
 		"status": "completed",
 		"createdAt": "2026-02-15T20:17:01.828Z",
 		"completedAt": "2026-02-15T21:13:42.964Z"
+	},
+	{
+		"id": "group-4d506af2",
+		"name": "fix-failing-tests",
+		"memberIssueIds": [
+			"overstory-gv2i",
+			"overstory-giqq",
+			"overstory-oa1x"
+		],
+		"status": "completed",
+		"createdAt": "2026-02-15T22:06:55.432Z",
+		"completedAt": "2026-02-15T22:39:36.506Z"
 	}
 ]
