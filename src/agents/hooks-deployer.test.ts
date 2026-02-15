@@ -242,6 +242,27 @@ describe("deployHooks", () => {
 		expect(postToolUse.hooks[0].command).toContain('read -r INPUT; echo "$INPUT" |');
 	});
 
+	test("PostToolUse hook includes mail check with debounce", async () => {
+		const worktreePath = join(tempDir, "mail-debounce-wt");
+
+		await deployHooks(worktreePath, "mail-debounce-agent");
+
+		const outputPath = join(worktreePath, ".claude", "settings.local.json");
+		const content = await Bun.file(outputPath).text();
+		const parsed = JSON.parse(content);
+		const postToolUse = parsed.hooks.PostToolUse[0];
+
+		// Should have 2 hooks: tool-end logging + mail check
+		expect(postToolUse.hooks).toHaveLength(2);
+
+		// Second hook should be mail check with debounce
+		expect(postToolUse.hooks[1].command).toContain("overstory mail check");
+		expect(postToolUse.hooks[1].command).toContain("--inject");
+		expect(postToolUse.hooks[1].command).toContain("--agent mail-debounce-agent");
+		expect(postToolUse.hooks[1].command).toContain("--debounce 500");
+		expect(postToolUse.hooks[1].command).toContain("OVERSTORY_AGENT_NAME");
+	});
+
 	test("Stop hook pipes stdin to overstory log with --stdin flag", async () => {
 		const worktreePath = join(tempDir, "worktree");
 

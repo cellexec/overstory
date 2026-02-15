@@ -511,4 +511,228 @@ describe("mailCommand", () => {
 			}
 		});
 	});
+
+	describe("mail check debounce", () => {
+		test("mail check without --debounce flag always executes", async () => {
+			// Send first message
+			const store = createMailStore(join(tempDir, ".overstory", "mail.db"));
+			const client = createMailClient(store);
+			client.send({
+				from: "orchestrator",
+				to: "test-agent",
+				subject: "Message 1",
+				body: "First message",
+			});
+			client.close();
+
+			// First check
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "test-agent"]);
+			const firstOutput = output;
+
+			// Send second message
+			const store2 = createMailStore(join(tempDir, ".overstory", "mail.db"));
+			const client2 = createMailClient(store2);
+			client2.send({
+				from: "orchestrator",
+				to: "test-agent",
+				subject: "Message 2",
+				body: "Second message",
+			});
+			client2.close();
+
+			// Second check immediately after
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "test-agent"]);
+			const secondOutput = output;
+
+			// Both should execute (no debouncing without flag)
+			expect(firstOutput).toContain("Message 1");
+			expect(secondOutput).toContain("Message 2");
+		});
+
+		test("mail check with --debounce 500 skips second check within window", async () => {
+			// First check with debounce
+			output = "";
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toContain("Build task");
+
+			// Second check immediately (within debounce window)
+			output = "";
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+			// Should be skipped silently
+			expect(output).toBe("");
+		});
+
+		test("mail check with --debounce allows check after window expires", async () => {
+			// Send first message
+			const store = createMailStore(join(tempDir, ".overstory", "mail.db"));
+			const client = createMailClient(store);
+			client.send({
+				from: "orchestrator",
+				to: "debounce-test",
+				subject: "First",
+				body: "First check",
+			});
+			client.close();
+
+			// First check with debounce
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "debounce-test", "--debounce", "100"]);
+			expect(output).toContain("First check");
+
+			// Wait for debounce window to expire
+			await Bun.sleep(150);
+
+			// Send second message
+			const store2 = createMailStore(join(tempDir, ".overstory", "mail.db"));
+			const client2 = createMailClient(store2);
+			client2.send({
+				from: "orchestrator",
+				to: "debounce-test",
+				subject: "Second",
+				body: "Second check",
+			});
+			client2.close();
+
+			// Second check after debounce window
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "debounce-test", "--debounce", "100"]);
+			expect(output).toContain("Second check");
+		});
+
+		test("mail check with --debounce 0 disables debouncing", async () => {
+			// Send first message
+			const store = createMailStore(join(tempDir, ".overstory", "mail.db"));
+			const client = createMailClient(store);
+			client.send({
+				from: "orchestrator",
+				to: "zero-debounce",
+				subject: "Msg 1",
+				body: "Message one",
+			});
+			client.close();
+
+			// First check with --debounce 0
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "zero-debounce", "--debounce", "0"]);
+			expect(output).toContain("Message one");
+
+			// Send second message immediately
+			const store2 = createMailStore(join(tempDir, ".overstory", "mail.db"));
+			const client2 = createMailClient(store2);
+			client2.send({
+				from: "orchestrator",
+				to: "zero-debounce",
+				subject: "Msg 2",
+				body: "Message two",
+			});
+			client2.close();
+
+			// Second check immediately (should work with debounce 0)
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "zero-debounce", "--debounce", "0"]);
+			expect(output).toContain("Message two");
+		});
+
+		test("mail check debounce is per-agent", async () => {
+			// Check for builder-1 with debounce
+			output = "";
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toContain("Build task");
+
+			// Check for scout-1 immediately (different agent)
+			output = "";
+			await mailCommand(["check", "--agent", "scout-1", "--debounce", "500"]);
+			expect(output).toContain("Explore API");
+
+			// Check for builder-1 again (should be debounced)
+			output = "";
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toBe("");
+		});
+
+		test("mail check --debounce with invalid value throws ValidationError", async () => {
+			try {
+				await mailCommand(["check", "--agent", "builder-1", "--debounce", "invalid"]);
+				expect(true).toBe(false); // Should not reach here
+			} catch (err) {
+				expect(err).toBeInstanceOf(Error);
+				if (err instanceof Error) {
+					expect(err.message).toContain("must be a non-negative integer");
+				}
+			}
+		});
+
+		test("mail check --debounce with negative value throws ValidationError", async () => {
+			try {
+				await mailCommand(["check", "--agent", "builder-1", "--debounce", "-100"]);
+				expect(true).toBe(false);
+			} catch (err) {
+				expect(err).toBeInstanceOf(Error);
+				if (err instanceof Error) {
+					expect(err.message).toContain("must be a non-negative integer");
+				}
+			}
+		});
+
+		test("mail check --inject with --debounce skips check within window", async () => {
+			// First inject check with debounce
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toContain("Build task");
+
+			// Second inject check immediately (should be debounced)
+			output = "";
+			await mailCommand(["check", "--inject", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toBe("");
+		});
+
+		test("mail check debounce state persists across invocations", async () => {
+			// First check
+			output = "";
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toContain("Build task");
+
+			// Verify state file was created
+			const statePath = join(tempDir, ".overstory", "mail-check-state.json");
+			const file = Bun.file(statePath);
+			expect(await file.exists()).toBe(true);
+
+			const state = JSON.parse(await file.text()) as Record<string, number>;
+			expect(state["builder-1"]).toBeTruthy();
+			expect(typeof state["builder-1"]).toBe("number");
+		});
+
+		test("corrupted debounce state file is handled gracefully", async () => {
+			// Write corrupted state file
+			const statePath = join(tempDir, ".overstory", "mail-check-state.json");
+			await Bun.write(statePath, "not valid json");
+
+			// Should not throw, should treat as fresh state
+			output = "";
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+			expect(output).toContain("Build task");
+
+			// State should be corrected
+			const state = JSON.parse(await Bun.file(statePath).text()) as Record<string, number>;
+			expect(state["builder-1"]).toBeTruthy();
+		});
+
+		test("mail check debounce only records timestamp when flag is provided", async () => {
+			const statePath = join(tempDir, ".overstory", "mail-check-state.json");
+
+			// Check without debounce flag
+			await mailCommand(["check", "--agent", "builder-1"]);
+
+			// State file should not be created
+			expect(await Bun.file(statePath).exists()).toBe(false);
+
+			// Check with debounce flag
+			await mailCommand(["check", "--agent", "builder-1", "--debounce", "500"]);
+
+			// Now state file should exist
+			expect(await Bun.file(statePath).exists()).toBe(true);
+		});
+	});
 });

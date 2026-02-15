@@ -177,6 +177,72 @@ async function readAndClearPendingNudge(
 	}
 }
 
+// === Mail Check Debounce ===
+//
+// Prevents excessive mail checking by tracking the last check timestamp per agent.
+// When --debounce flag is provided, mail check will skip if called within the
+// debounce window.
+
+/**
+ * Path to the mail check debounce state file.
+ */
+function mailCheckStatePath(cwd: string): string {
+	return join(cwd, ".overstory", "mail-check-state.json");
+}
+
+/**
+ * Check if a mail check for this agent is within the debounce window.
+ *
+ * @param cwd - Project root directory
+ * @param agentName - Agent name
+ * @param debounceMs - Debounce interval in milliseconds
+ * @returns true if the last check was within the debounce window
+ */
+async function isMailCheckDebounced(
+	cwd: string,
+	agentName: string,
+	debounceMs: number,
+): Promise<boolean> {
+	const statePath = mailCheckStatePath(cwd);
+	const file = Bun.file(statePath);
+	if (!(await file.exists())) {
+		return false;
+	}
+	try {
+		const text = await file.text();
+		const state = JSON.parse(text) as Record<string, number>;
+		const lastCheck = state[agentName];
+		if (lastCheck === undefined) {
+			return false;
+		}
+		return Date.now() - lastCheck < debounceMs;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Record a mail check timestamp for debounce tracking.
+ *
+ * @param cwd - Project root directory
+ * @param agentName - Agent name
+ */
+async function recordMailCheck(cwd: string, agentName: string): Promise<void> {
+	const statePath = mailCheckStatePath(cwd);
+	let state: Record<string, number> = {};
+	const file = Bun.file(statePath);
+	if (await file.exists()) {
+		try {
+			const text = await file.text();
+			state = JSON.parse(text) as Record<string, number>;
+		} catch {
+			// Corrupt state file — start fresh
+		}
+	}
+	state[agentName] = Date.now();
+	await Bun.write(statePath, `${JSON.stringify(state, null, "\t")}\n`);
+}
+
 /**
  * Open a mail client connected to the project's mail.db.
  * The cwd must already be resolved to the canonical project root.
@@ -313,6 +379,29 @@ async function handleCheck(args: string[], cwd: string): Promise<void> {
 	const agent = getFlag(args, "--agent") ?? "orchestrator";
 	const inject = hasFlag(args, "--inject");
 	const json = hasFlag(args, "--json");
+	const debounceFlag = getFlag(args, "--debounce");
+
+	// Parse debounce interval if provided
+	let debounceMs: number | undefined;
+	if (debounceFlag !== undefined) {
+		const parsed = Number.parseInt(debounceFlag, 10);
+		if (Number.isNaN(parsed) || parsed < 0) {
+			throw new ValidationError(
+				`--debounce must be a non-negative integer (milliseconds), got: ${debounceFlag}`,
+				{ field: "debounce", value: debounceFlag },
+			);
+		}
+		debounceMs = parsed;
+	}
+
+	// Check debounce if enabled
+	if (debounceMs !== undefined) {
+		const debounced = await isMailCheckDebounced(cwd, agent, debounceMs);
+		if (debounced) {
+			// Silent skip — no output when debounced
+			return;
+		}
+	}
 
 	const client = openClient(cwd);
 	try {
@@ -330,22 +419,26 @@ async function handleCheck(args: string[], cwd: string): Promise<void> {
 			if (output.length > 0) {
 				process.stdout.write(output);
 			}
-			return;
+		} else {
+			const messages = client.check(agent);
+
+			if (json) {
+				process.stdout.write(`${JSON.stringify(messages)}\n`);
+			} else if (messages.length === 0) {
+				process.stdout.write("No new messages.\n");
+			} else {
+				process.stdout.write(
+					`📬 ${messages.length} new message${messages.length === 1 ? "" : "s"}:\n\n`,
+				);
+				for (const msg of messages) {
+					process.stdout.write(`${formatMessage(msg)}\n\n`);
+				}
+			}
 		}
 
-		const messages = client.check(agent);
-
-		if (json) {
-			process.stdout.write(`${JSON.stringify(messages)}\n`);
-		} else if (messages.length === 0) {
-			process.stdout.write("No new messages.\n");
-		} else {
-			process.stdout.write(
-				`📬 ${messages.length} new message${messages.length === 1 ? "" : "s"}:\n\n`,
-			);
-			for (const msg of messages) {
-				process.stdout.write(`${formatMessage(msg)}\n\n`);
-			}
+		// Record this check for debounce tracking (only if debounce is enabled)
+		if (debounceMs !== undefined) {
+			await recordMailCheck(cwd, agent);
 		}
 	} finally {
 		client.close();
