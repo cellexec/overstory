@@ -4,21 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSessionStore } from "../sessions/store.ts";
 import type { OverstoryConfig } from "../types.ts";
+import type { ConsistencyCheckDeps } from "./consistency.ts";
 import { checkConsistency } from "./consistency.ts";
 
 /**
- * Mock tmux module to avoid real tmux operations in tests.
+ * Mock tmux functions using dependency injection instead of mock.module().
+ * This avoids test isolation issues from module-level mocking.
  */
 const mockListSessions = mock(() => Promise.resolve([] as Array<{ name: string; pid: number }>));
 const mockIsProcessAlive = mock((_pid: number) => true);
-
-mock.module("../worktree/tmux.ts", () => ({
-	listSessions: mockListSessions,
-	isProcessAlive: mockIsProcessAlive,
-	createSession: mock(() => Promise.resolve(12345)),
-	killSession: mock(() => Promise.resolve()),
-	isSessionAlive: mock(() => Promise.resolve(true)),
-}));
 
 /**
  * Create a minimal temp git repo for worktree tests.
@@ -61,6 +55,7 @@ describe("checkConsistency", () => {
 	let repoRoot: string;
 	let overstoryDir: string;
 	let config: OverstoryConfig;
+	let mockDeps: ConsistencyCheckDeps;
 
 	beforeEach(() => {
 		repoRoot = createTempGitRepo();
@@ -111,11 +106,16 @@ describe("checkConsistency", () => {
 			},
 		};
 
-		// Reset mocks
+		// Reset mocks and create deps object
 		mockListSessions.mockReset();
 		mockIsProcessAlive.mockReset();
 		mockListSessions.mockResolvedValue([]);
 		mockIsProcessAlive.mockReturnValue(true);
+
+		mockDeps = {
+			listSessions: mockListSessions,
+			isProcessAlive: mockIsProcessAlive,
+		};
 	});
 
 	afterEach(() => {
@@ -125,7 +125,7 @@ describe("checkConsistency", () => {
 	});
 
 	test("returns all pass when no sessions exist", async () => {
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		expect(checks.length).toBeGreaterThan(0);
 		const passChecks = checks.filter((c) => c.status === "pass");
@@ -140,7 +140,7 @@ describe("checkConsistency", () => {
 		const worktreePath = join(overstoryDir, "worktrees", "orphan-agent");
 		createWorktree(repoRoot, worktreePath, "overstory/orphan-agent/test-123");
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const orphanCheck = checks.find((c) => c.name === "orphaned-worktrees");
 		expect(orphanCheck).toBeDefined();
@@ -154,7 +154,7 @@ describe("checkConsistency", () => {
 		// Mock a tmux session that isn't in SessionStore
 		mockListSessions.mockResolvedValue([{ name: "overstory-testproject-orphan", pid: 9999 }]);
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const orphanCheck = checks.find((c) => c.name === "orphaned-tmux");
 		expect(orphanCheck).toBeDefined();
@@ -170,7 +170,7 @@ describe("checkConsistency", () => {
 			{ name: "my-custom-session", pid: 8888 },
 		]);
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const orphanCheck = checks.find((c) => c.name === "orphaned-tmux");
 		expect(orphanCheck).toBeDefined();
@@ -206,7 +206,7 @@ describe("checkConsistency", () => {
 		// Mock that this PID is not alive
 		mockIsProcessAlive.mockReturnValue(false);
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const deadPidCheck = checks.find((c) => c.name === "dead-pids");
 		expect(deadPidCheck).toBeDefined();
@@ -242,7 +242,7 @@ describe("checkConsistency", () => {
 		// Mock that this PID is alive
 		mockIsProcessAlive.mockReturnValue(true);
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const deadPidCheck = checks.find((c) => c.name === "dead-pids");
 		expect(deadPidCheck).toBeDefined();
@@ -274,7 +274,7 @@ describe("checkConsistency", () => {
 		});
 		store.close();
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const missingCheck = checks.find((c) => c.name === "missing-worktrees");
 		expect(missingCheck).toBeDefined();
@@ -313,7 +313,7 @@ describe("checkConsistency", () => {
 		// Mock empty tmux sessions list
 		mockListSessions.mockResolvedValue([]);
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const missingCheck = checks.find((c) => c.name === "missing-tmux");
 		expect(missingCheck).toBeDefined();
@@ -357,7 +357,7 @@ describe("checkConsistency", () => {
 		// Mock PID as alive
 		mockIsProcessAlive.mockReturnValue(true);
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const warnOrFail = checks.filter((c) => c.status === "warn" || c.status === "fail");
 		expect(warnOrFail.length).toBe(0);
@@ -367,7 +367,7 @@ describe("checkConsistency", () => {
 		// Mock tmux listing to throw an error
 		mockListSessions.mockRejectedValue(new Error("tmux: command not found"));
 
-		const checks = await checkConsistency(config, overstoryDir);
+		const checks = await checkConsistency(config, overstoryDir, mockDeps);
 
 		const tmuxCheck = checks.find((c) => c.name === "tmux-listing");
 		expect(tmuxCheck).toBeDefined();
@@ -379,7 +379,7 @@ describe("checkConsistency", () => {
 		// Use a non-existent repo root to trigger worktree listing failure
 		const badConfig = { ...config, project: { ...config.project, root: "/nonexistent" } };
 
-		const checks = await checkConsistency(badConfig, overstoryDir);
+		const checks = await checkConsistency(badConfig, overstoryDir, mockDeps);
 
 		expect(checks.length).toBe(1);
 		expect(checks[0]?.name).toBe("worktree-listing");
@@ -390,7 +390,7 @@ describe("checkConsistency", () => {
 		// Use a bad overstory directory path
 		const badOverstoryDir = "/nonexistent/.overstory";
 
-		const checks = await checkConsistency(config, badOverstoryDir);
+		const checks = await checkConsistency(config, badOverstoryDir, mockDeps);
 
 		const storeCheck = checks.find((c) => c.name === "sessionstore-open");
 		expect(storeCheck).toBeDefined();

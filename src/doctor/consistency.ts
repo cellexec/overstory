@@ -4,16 +4,35 @@ import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession, OverstoryConfig } from "../types.ts";
 import { listWorktrees } from "../worktree/manager.ts";
 import { isProcessAlive, listSessions } from "../worktree/tmux.ts";
-import type { DoctorCheck, DoctorCheckFn } from "./types.ts";
+import type { DoctorCheck } from "./types.ts";
+
+/**
+ * Dependencies for consistency checks.
+ * Allows injection for testing without module-level mocks.
+ */
+export interface ConsistencyCheckDeps {
+	listSessions: () => Promise<Array<{ name: string; pid: number }>>;
+	isProcessAlive: (pid: number) => boolean;
+}
 
 /**
  * Cross-subsystem consistency checks.
  * Validates SessionStore vs worktrees, tmux sessions vs sessions, etc.
+ *
+ * @param config - Overstory configuration
+ * @param overstoryDir - Absolute path to .overstory/
+ * @param deps - Optional dependencies for testing (defaults to real implementations)
  */
-export const checkConsistency: DoctorCheckFn = async (
+export async function checkConsistency(
 	config: OverstoryConfig,
 	overstoryDir: string,
-): Promise<DoctorCheck[]> => {
+	deps?: ConsistencyCheckDeps,
+): Promise<DoctorCheck[]> {
+	// Use injected dependencies or defaults
+	const { listSessions: listSessionsFn, isProcessAlive: isProcessAliveFn } = deps || {
+		listSessions,
+		isProcessAlive,
+	};
 	const checks: DoctorCheck[] = [];
 
 	// Gather data from all three sources
@@ -38,7 +57,7 @@ export const checkConsistency: DoctorCheckFn = async (
 
 	// 2. List tmux sessions
 	try {
-		tmuxSessions = await listSessions();
+		tmuxSessions = await listSessionsFn();
 	} catch (error) {
 		// Tmux not installed or not running is not necessarily a fatal error
 		checks.push({
@@ -136,7 +155,7 @@ export const checkConsistency: DoctorCheckFn = async (
 	}
 
 	// 6. Check for dead processes in SessionStore
-	const deadSessions = storeSessions.filter((s) => s.pid !== null && !isProcessAlive(s.pid));
+	const deadSessions = storeSessions.filter((s) => s.pid !== null && !isProcessAliveFn(s.pid));
 
 	if (deadSessions.length > 0) {
 		checks.push({
@@ -215,4 +234,4 @@ export const checkConsistency: DoctorCheckFn = async (
 	}
 
 	return checks;
-};
+}
