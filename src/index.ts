@@ -19,6 +19,7 @@ import { hooksCommand } from "./commands/hooks.ts";
 import { initCommand } from "./commands/init.ts";
 import { inspectCommand } from "./commands/inspect.ts";
 import { logCommand } from "./commands/log.ts";
+import { logsCommand } from "./commands/logs.ts";
 import { mailCommand } from "./commands/mail.ts";
 import { mergeCommand } from "./commands/merge.ts";
 import { metricsCommand } from "./commands/metrics.ts";
@@ -63,6 +64,7 @@ Commands:
   doctor                  Run health checks on overstory setup
   worktree <sub>          Manage worktrees (list/clean)
   log <event>             Log a hook event
+  logs [options]          Query NDJSON logs across agents
   watch                   Start watchdog daemon
   trace <target>         Chronological event timeline for agent/bead
   errors [options]        Aggregated error view across agents
@@ -99,6 +101,7 @@ const COMMANDS = [
 	"group",
 	"worktree",
 	"log",
+	"logs",
 	"watch",
 	"trace",
 	"errors",
@@ -236,6 +239,9 @@ async function main(): Promise<void> {
 			break;
 		case "log":
 			await logCommand(commandArgs);
+			break;
+		case "logs":
+			await logsCommand(commandArgs);
 			break;
 		case "watch":
 			await watchCommand(commandArgs);

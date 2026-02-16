@@ -169,6 +169,25 @@ export const COMMANDS: readonly CommandDef[] = [
 		],
 	},
 	{
+		name: "logs",
+		desc: "Query NDJSON logs across agents",
+		flags: [
+			{ name: "--agent", desc: "Filter by agent", takesValue: true },
+			{
+				name: "--level",
+				desc: "Filter by log level",
+				takesValue: true,
+				values: ["debug", "info", "warn", "error"],
+			},
+			{ name: "--since", desc: "Time filter (ISO 8601 or relative)", takesValue: true },
+			{ name: "--until", desc: "Time filter (ISO 8601)", takesValue: true },
+			{ name: "--limit", desc: "Max entries", takesValue: true },
+			{ name: "--follow", desc: "Tail logs in real time" },
+			{ name: "--json", desc: "JSON output" },
+			{ name: "--help", desc: "Show help" },
+		],
+	},
+	{
 		name: "watch",
 		desc: "Start watchdog daemon",
 		flags: [
@@ -545,7 +564,7 @@ export function generateBash(): string {
 		"  local cur prev words cword",
 		"  _init_completion || return",
 		"",
-		"  local commands='init sling prime status dashboard inspect merge nudge clean doctor log watch trace errors replay costs metrics spec coordinator supervisor hooks monitor mail group worktree run'",
+		"  local commands='init sling prime status dashboard inspect merge nudge clean doctor log logs watch trace errors replay costs metrics spec coordinator supervisor hooks monitor mail group worktree run'",
 		"",
 		"  # Top-level completion",
 		"  if [[ $cword -eq 1 ]]; then",
