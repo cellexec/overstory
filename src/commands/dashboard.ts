@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { loadConfig } from "../config.ts";
 import { ValidationError } from "../errors.ts";
 import { createMailStore } from "../mail/store.ts";
+import { createMergeQueue } from "../merge/queue.ts";
 import { createMetricsStore } from "../metrics/store.ts";
 import type { MailMessage } from "../types.ts";
 import { gatherStatus, type StatusData } from "./status.ts";
@@ -154,19 +155,16 @@ async function loadDashboardData(root: string): Promise<DashboardData> {
 	// Load merge queue
 	let mergeQueue: Array<{ branchName: string; agentName: string; status: string }> = [];
 	try {
-		const queuePath = join(root, ".overstory", "merge-queue.json");
-		const queueFile = Bun.file(queuePath);
-		if (await queueFile.exists()) {
-			const text = await queueFile.text();
-			const entries = JSON.parse(text) as Array<{
-				branchName: string;
-				agentName: string;
-				status: string;
-			}>;
-			mergeQueue = entries;
-		}
+		const queuePath = join(root, ".overstory", "merge-queue.db");
+		const queue = createMergeQueue(queuePath);
+		mergeQueue = queue.list().map((e) => ({
+			branchName: e.branchName,
+			agentName: e.agentName,
+			status: e.status,
+		}));
+		queue.close();
 	} catch {
-		// Queue might not exist
+		// Queue db might not exist
 	}
 
 	// Load metrics

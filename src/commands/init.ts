@@ -414,7 +414,9 @@ sessions.json
 sessions.db
 sessions.db-wal
 sessions.db-shm
-merge-queue.json
+merge-queue.db
+merge-queue.db-wal
+merge-queue.db-shm
 nudge-state.json
 pending-nudges/
 agents/

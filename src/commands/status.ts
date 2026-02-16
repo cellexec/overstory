@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { loadConfig } from "../config.ts";
 import { ValidationError } from "../errors.ts";
 import { createMailStore } from "../mail/store.ts";
+import { createMergeQueue } from "../merge/queue.ts";
 import { createMetricsStore } from "../metrics/store.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
@@ -124,13 +125,10 @@ export async function gatherStatus(
 
 		let mergeQueueCount = 0;
 		try {
-			const queuePath = join(root, ".overstory", "merge-queue.json");
-			const queueFile = Bun.file(queuePath);
-			if (await queueFile.exists()) {
-				const text = await queueFile.text();
-				const entries = JSON.parse(text) as Array<{ status: string }>;
-				mergeQueueCount = entries.filter((e) => e.status === "pending").length;
-			}
+			const queuePath = join(root, ".overstory", "merge-queue.db");
+			const queue = createMergeQueue(queuePath);
+			mergeQueueCount = queue.list("pending").length;
+			queue.close();
 		} catch {
 			// queue might not exist
 		}

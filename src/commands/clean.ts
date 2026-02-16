@@ -14,7 +14,7 @@
  *   2. Remove all worktrees
  *   3. Delete orphaned overstory/* branches
  *   4. Delete SQLite databases (mail.db, metrics.db)
- *   5. Wipe sessions.db, reset merge-queue.json
+ *   5. Wipe sessions.db, merge-queue.db
  *   6. Clear directory contents (logs/, agents/, specs/)
  *   7. Delete nudge-state.json
  */
@@ -411,7 +411,7 @@ When --all is passed, ALL of the above are executed in safe order:
   1. Kill all overstory tmux sessions (processes first)
   2. Remove all worktrees
   3. Delete orphaned branch refs
-  4. Wipe mail.db, metrics.db, sessions.db, merge-queue.json
+  4. Wipe mail.db, metrics.db, sessions.db, merge-queue.db
   5. Clear logs, agents, specs, nudge state`;
 
 export async function cleanCommand(args: string[]): Promise<void> {
@@ -515,7 +515,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		await resetJsonFile(join(overstoryDir, "sessions.json"));
 	}
 	if (all) {
-		result.mergeQueueCleared = await resetJsonFile(join(overstoryDir, "merge-queue.json"));
+		result.mergeQueueCleared = await wipeSqliteDb(join(overstoryDir, "merge-queue.db"));
 	}
 
 	// 7. Clear directories
@@ -564,7 +564,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	if (result.mailWiped) lines.push("Wiped mail.db");
 	if (result.metricsWiped) lines.push("Wiped metrics.db");
 	if (result.sessionsCleared) lines.push("Wiped sessions.db");
-	if (result.mergeQueueCleared) lines.push("Reset merge-queue.json");
+	if (result.mergeQueueCleared) lines.push("Wiped merge-queue.db");
 	if (result.logsCleared) lines.push("Cleared logs/");
 	if (result.agentsCleared) lines.push("Cleared agents/");
 	if (result.specsCleared) lines.push("Cleared specs/");

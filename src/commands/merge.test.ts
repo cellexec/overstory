@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { ValidationError } from "../errors.ts";
+import { createMergeQueue } from "../merge/queue.ts";
 import {
 	cleanupTempDir,
 	commitFile,
@@ -295,29 +296,22 @@ merge:
 			await createCleanFeatureBranch(repoDir, branch1);
 			await createCleanFeatureBranch(repoDir, branch2);
 
-			// Write merge-queue.json with pending entries
-			const queuePath = join(repoDir, ".overstory", "merge-queue.json");
-			const queueData = [
-				{
-					branchName: branch1,
-					beadId: "bead-001",
-					agentName: "agent1",
-					filesModified: [`src/${branch1}.ts`],
-					status: "pending",
-					resolvedTier: null,
-					enqueuedAt: new Date().toISOString(),
-				},
-				{
-					branchName: branch2,
-					beadId: "bead-002",
-					agentName: "agent2",
-					filesModified: [`src/${branch2}.ts`],
-					status: "pending",
-					resolvedTier: null,
-					enqueuedAt: new Date().toISOString(),
-				},
-			];
-			await Bun.write(queuePath, `${JSON.stringify(queueData, null, "\t")}\n`);
+			// Enqueue entries via createMergeQueue
+			const queuePath = join(repoDir, ".overstory", "merge-queue.db");
+			const queue = createMergeQueue(queuePath);
+			queue.enqueue({
+				branchName: branch1,
+				beadId: "bead-001",
+				agentName: "agent1",
+				filesModified: [`src/${branch1}.ts`],
+			});
+			queue.enqueue({
+				branchName: branch2,
+				beadId: "bead-002",
+				agentName: "agent2",
+				filesModified: [`src/${branch2}.ts`],
+			});
+			queue.close();
 
 			let output = "";
 			const originalWrite = process.stdout.write.bind(process.stdout);
@@ -344,29 +338,22 @@ merge:
 			await createCleanFeatureBranch(repoDir, branch1);
 			await createCleanFeatureBranch(repoDir, branch2);
 
-			// Write merge-queue.json with pending entries
-			const queuePath = join(repoDir, ".overstory", "merge-queue.json");
-			const queueData = [
-				{
-					branchName: branch1,
-					beadId: "bead-100",
-					agentName: "builder1",
-					filesModified: [`src/${branch1}.ts`],
-					status: "pending",
-					resolvedTier: null,
-					enqueuedAt: new Date().toISOString(),
-				},
-				{
-					branchName: branch2,
-					beadId: "bead-200",
-					agentName: "builder2",
-					filesModified: [`src/${branch2}.ts`],
-					status: "pending",
-					resolvedTier: null,
-					enqueuedAt: new Date().toISOString(),
-				},
-			];
-			await Bun.write(queuePath, `${JSON.stringify(queueData, null, "\t")}\n`);
+			// Enqueue entries via createMergeQueue
+			const queuePath = join(repoDir, ".overstory", "merge-queue.db");
+			const queue = createMergeQueue(queuePath);
+			queue.enqueue({
+				branchName: branch1,
+				beadId: "bead-100",
+				agentName: "builder1",
+				filesModified: [`src/${branch1}.ts`],
+			});
+			queue.enqueue({
+				branchName: branch2,
+				beadId: "bead-200",
+				agentName: "builder2",
+				filesModified: [`src/${branch2}.ts`],
+			});
+			queue.close();
 
 			let output = "";
 			const originalWrite = process.stdout.write.bind(process.stdout);
@@ -396,20 +383,16 @@ merge:
 			const branch1 = "overstory/builder3/bead-300";
 			await createCleanFeatureBranch(repoDir, branch1);
 
-			// Write merge-queue.json with one pending entry
-			const queuePath = join(repoDir, ".overstory", "merge-queue.json");
-			const queueData = [
-				{
-					branchName: branch1,
-					beadId: "bead-300",
-					agentName: "builder3",
-					filesModified: [`src/${branch1}.ts`],
-					status: "pending",
-					resolvedTier: null,
-					enqueuedAt: new Date().toISOString(),
-				},
-			];
-			await Bun.write(queuePath, `${JSON.stringify(queueData, null, "\t")}\n`);
+			// Enqueue entry via createMergeQueue
+			const queuePath = join(repoDir, ".overstory", "merge-queue.db");
+			const queue = createMergeQueue(queuePath);
+			queue.enqueue({
+				branchName: branch1,
+				beadId: "bead-300",
+				agentName: "builder3",
+				filesModified: [`src/${branch1}.ts`],
+			});
+			queue.close();
 
 			let output = "";
 			const originalWrite = process.stdout.write.bind(process.stdout);

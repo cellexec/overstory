@@ -14,6 +14,7 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createEventStore } from "../events/store.ts";
 import { createMailStore } from "../mail/store.ts";
+import { createMergeQueue } from "../merge/queue.ts";
 import { createMetricsStore } from "../metrics/store.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import { cleanupTempDir, createTempGitRepo } from "../test-helpers.ts";
@@ -184,15 +185,22 @@ describe("--all", () => {
 		expect(stdoutOutput).toContain("Wiped sessions.db");
 	});
 
-	test("resets merge-queue.json to empty array", async () => {
-		const queuePath = join(overstoryDir, "merge-queue.json");
-		await Bun.write(queuePath, '[{"branchName":"test"}]\n');
+	test("wipes merge-queue.db", async () => {
+		const queuePath = join(overstoryDir, "merge-queue.db");
+		// Create a queue with an entry so we can verify it gets wiped
+		const queue = createMergeQueue(queuePath);
+		queue.enqueue({
+			branchName: "test-branch",
+			beadId: "beads-test",
+			agentName: "test",
+			filesModified: ["src/test.ts"],
+		});
+		queue.close();
 
 		await cleanCommand(["--all"]);
 
-		const content = await Bun.file(queuePath).text();
-		expect(JSON.parse(content)).toEqual([]);
-		expect(stdoutOutput).toContain("Reset merge-queue.json");
+		expect(await Bun.file(queuePath).exists()).toBe(false);
+		expect(stdoutOutput).toContain("Wiped merge-queue.db");
 	});
 
 	test("clears logs directory contents", async () => {

@@ -170,7 +170,7 @@ export async function mergeCommand(args: string[]): Promise<void> {
 
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
-	const queuePath = join(config.project.root, ".overstory", "merge-queue.json");
+	const queuePath = join(config.project.root, ".overstory", "merge-queue.db");
 	const queue = createMergeQueue(queuePath);
 	const resolver = createMergeResolver({
 		aiResolveEnabled: config.merge.aiResolveEnabled,
