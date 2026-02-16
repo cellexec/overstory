@@ -39,7 +39,7 @@ import { worktreeCommand } from "./commands/worktree.ts";
 import { OverstoryError, WorktreeError } from "./errors.ts";
 import { setQuiet } from "./logging/color.ts";
 
-const VERSION = "0.4.1";
+const VERSION = "0.5.0";
 
 const HELP = `overstory v${VERSION} — Multi-agent orchestration for Claude Code
 
@@ -52,7 +52,6 @@ Commands:
   prime                   Load context for orchestrator/agent
   status                  Show all active agents and project state
   dashboard               Live TUI dashboard for agent monitoring
-  feed [options]          Unified real-time event stream across all agents
   inspect <agent>         Deep inspection of a single agent
   coordinator <sub>       Persistent coordinator agent (start/stop/status)
   supervisor <sub>        Per-project supervisor agent (start/stop/status)
@@ -68,8 +67,8 @@ Commands:
   log <event>             Log a hook event
   logs [options]          Query NDJSON logs across agents
   watch                   Start watchdog daemon
-  trace <target>         Chronological event timeline for agent/bead
   feed [options]          Unified real-time event stream across all agents
+  trace <target>         Chronological event timeline for agent/bead
   errors [options]        Aggregated error view across agents
   run [sub]               Manage runs (list/show/complete)
   replay [options]        Interleaved chronological replay across agents
@@ -109,7 +108,6 @@ const COMMANDS = [
 	"trace",
 	"feed",
 	"errors",
-	"feed",
 	"replay",
 	"run",
 	"costs",
@@ -259,9 +257,6 @@ async function main(): Promise<void> {
 			break;
 		case "errors":
 			await errorsCommand(commandArgs);
-			break;
-		case "feed":
-			await feedCommand(commandArgs);
 			break;
 		case "replay":
 			await replayCommand(commandArgs);

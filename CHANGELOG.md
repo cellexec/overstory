@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-16
+
+### Added
+
+#### New CLI Commands
+- `overstory feed` — unified real-time event stream across all agents with `--follow` mode for continuous polling, agent/run filtering, and JSON output
+- `overstory logs` — query NDJSON log files across agents with level filtering (`--level`), time range queries (`--since`/`--until`), and `--follow` tail mode
+- `overstory costs --live` — real-time token usage display for active agents
+
+#### New Flags
+- `--monitor` flag for `coordinator start/stop/status` — manage the Tier 2 monitor agent alongside the coordinator
+
+#### Agent Improvements
+- Mulch recording as required completion gate for all agent types — agents must record learnings before session close
+- Mulch learn extraction added to Stop hooks for orchestrator and all agents
+- Scout-spawning made default in lead.md Phase 1 with parallel support
+- Reviewer spawning made mandatory in lead.md
+
+#### Infrastructure
+- Real-time token tracking infrastructure (`src/metrics/store.ts`, `src/commands/costs.ts`) — live session cost monitoring via transcript JSONL parsing
+
+#### Testing
+- Test suite grew from 1673 to 1749 tests across 71 files (4460 expect() calls)
+
+### Fixed
+- Duplicate `feed` entry in CLI command router and help text
+
 ## [0.4.1] - 2026-02-16
 
 ### Added
@@ -214,7 +241,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Biome configuration for formatting and linting
 - TypeScript strict mode with `noUncheckedIndexedAccess`
 
-[Unreleased]: https://github.com/jayminwest/overstory/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jayminwest/overstory/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jayminwest/overstory/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jayminwest/overstory/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jayminwest/overstory/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jayminwest/overstory/compare/v0.2.0...v0.3.0

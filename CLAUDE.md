@@ -50,7 +50,7 @@ Purpose-built messaging via `bun:sqlite` in `.overstory/mail.db`. WAL mode for c
 ```
 overstory/                        # This repo (the overstory tool itself)
   src/
-    index.ts                      # CLI entry point (command router, 26 commands)
+    index.ts                      # CLI entry point (command router, 28 commands)
     types.ts                      # ALL shared types and interfaces
     config.ts                     # Config loader + defaults + validation
     errors.ts                     # Custom error types (extend OverstoryError)
@@ -73,6 +73,8 @@ overstory/                        # This repo (the overstory tool itself)
       doctor.ts                   # overstory doctor (health checks)
       worktree.ts                 # overstory worktree list/clean
       log.ts                      # overstory log (hook target)
+      logs.ts                     # overstory logs (NDJSON log query)
+      feed.ts                     # overstory feed (unified event stream)
       watch.ts                    # overstory watch (watchdog)
       monitor.ts                  # overstory monitor start/stop/status (Tier 2)
       trace.ts                    # overstory trace (event timeline)
@@ -256,6 +258,7 @@ overstory coordinator <sub>            Persistent coordinator agent
   start                                  Start coordinator (spawns Claude Code at root)
     --attach / --no-attach               Control tmux attach (default: attach on TTY)
     --watchdog                           Auto-start watchdog daemon
+    --monitor                            Auto-start Tier 2 monitor agent
   stop                                   Stop coordinator (kills tmux session)
   status                                 Show coordinator state
   --json                                 JSON output
@@ -364,7 +367,24 @@ overstory run [sub]                     Manage runs (coordinator session groupin
   complete                               Mark current run as completed
   --json                                 JSON output
 
+overstory feed [options]                Unified real-time event stream across agents
+  --follow, -f                           Continuously poll for new events
+  --interval <ms>                        Polling interval (default: 2000)
+  --agent <name>  --run <id>             Filter by agent or run
+  --since <ts>                           Start time (ISO 8601)
+  --limit <n>                            Max initial events
+  --json                                 JSON output
+
+overstory logs [options]                Query NDJSON logs across agents
+  --agent <name>                         Filter by agent
+  --level <level>                        Filter by log level (debug|info|warn|error)
+  --since <ts>  --until <ts>             Time range filter (ISO 8601 or relative)
+  --limit <n>                            Max entries
+  --follow                               Tail logs in real time
+  --json                                 JSON output
+
 overstory costs                          Token/cost analysis and breakdown
+  --live                                 Show real-time token usage for active agents
   --agent <name>  --run <id>             Filter by agent or run
   --by-capability                        Group by capability with subtotals
   --last <n>                             Recent sessions (default: 20)

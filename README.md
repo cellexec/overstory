@@ -103,6 +103,7 @@ overstory init                          Initialize .overstory/ in current projec
 overstory coordinator start             Start persistent coordinator agent
   --attach / --no-attach                 TTY-aware tmux attach (default: auto)
   --watchdog                             Auto-start watchdog daemon with coordinator
+  --monitor                              Auto-start Tier 2 monitor agent
 overstory coordinator stop              Stop coordinator
 overstory coordinator status            Show coordinator state
 
@@ -220,7 +221,21 @@ overstory replay                        Interleaved chronological replay
   --since <ts>  --until <ts>             Time range filter
   --limit <n>  --json
 
+overstory feed [options]                Unified real-time event stream across agents
+  --follow, -f                           Continuously poll for new events
+  --interval <ms>                        Polling interval (default: 2000)
+  --agent <name>  --run <id>             Filter by agent or run
+  --json                                 JSON output
+
+overstory logs [options]                Query NDJSON logs across agents
+  --agent <name>                         Filter by agent
+  --level <level>                        Filter by log level (debug|info|warn|error)
+  --since <ts>  --until <ts>             Time range filter
+  --follow                               Tail logs in real time
+  --json                                 JSON output
+
 overstory costs                         Token/cost analysis and breakdown
+  --live                                 Show real-time token usage for active agents
   --agent <name>                         Filter by agent
   --run <id>                             Filter by run
   --by-capability                        Group by capability type
@@ -241,13 +256,13 @@ Global Flags:
 - **Dependencies**: Zero runtime dependencies — only Bun built-in APIs
 - **Database**: SQLite via `bun:sqlite` (WAL mode for concurrent access)
 - **Linting**: Biome (formatter + linter)
-- **Testing**: `bun test` (1673 tests across 69 files, colocated with source)
+- **Testing**: `bun test` (1749 tests across 71 files, colocated with source)
 - **External CLIs**: `bd` (beads), `mulch`, `git`, `tmux` — invoked as subprocesses
 
 ## Development
 
 ```bash
-# Run tests (1673 tests across 69 files)
+# Run tests (1749 tests across 71 files)
 bun test
 
 # Run a single test
@@ -287,7 +302,7 @@ overstory/
     types.ts                      Shared types and interfaces
     config.ts                     Config loader + validation
     errors.ts                     Custom error types
-    commands/                     One file per CLI subcommand (27 commands)
+    commands/                     One file per CLI subcommand (28 commands)
       coordinator.ts              Persistent orchestrator lifecycle
       supervisor.ts               Team lead management
       dashboard.ts                Live TUI dashboard (ANSI, zero deps)
@@ -304,6 +319,8 @@ overstory/
       worktree.ts                 Worktree management
       watch.ts                    Watchdog daemon
       log.ts                      Hook event logging
+      logs.ts                     NDJSON log query
+      feed.ts                     Unified real-time event stream
       run.ts                      Orchestration run lifecycle
       trace.ts                    Agent/bead timeline viewing
       clean.ts                    Worktree/session cleanup
