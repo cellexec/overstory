@@ -1,7 +1,5 @@
 # Overstory
 
-Inspired by: https://github.com/steveyegge/gastown/
-
 [![CI](https://img.shields.io/github/actions/workflow/status/jayminwest/overstory/ci.yml?branch=main)](https://github.com/jayminwest/overstory/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bun](https://img.shields.io/badge/Bun-%E2%89%A51.0-orange)](https://bun.sh)
@@ -367,3 +365,7 @@ overstory/
 ## License
 
 MIT
+
+---
+
+Inspired by: https://github.com/steveyegge/gastown/
