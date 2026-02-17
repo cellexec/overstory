@@ -49,6 +49,7 @@ overstory sling <bead-id> \
 - **Load file-specific context:** `mulch prime --files <file1,file2,...>` for expertise scoped to specific files
 - **Load domain context:** `mulch prime [domain]` to understand the problem space before decomposing
 - **Record patterns:** `mulch record <domain>` to capture orchestration insights
+- **Record worker insights:** When scout or reviewer result mails contain `INSIGHT:` lines, record them via `mulch record <domain> --type <type> --description "<insight>"`. Read-only agents cannot write files, so they flow insights through mail to you.
 
 ## Three-Phase Workflow
 
