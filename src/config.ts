@@ -51,6 +51,7 @@ export const DEFAULT_CONFIG: OverstoryConfig = {
 };
 
 const CONFIG_FILENAME = "config.yaml";
+const CONFIG_LOCAL_FILENAME = "config.local.yaml";
 const OVERSTORY_DIR = ".overstory";
 
 /**
@@ -429,6 +430,53 @@ function validateConfig(config: OverstoryConfig): void {
 }
 
 /**
+ * Load and merge config.local.yaml on top of the current config.
+ *
+ * config.local.yaml is gitignored and provides machine-specific overrides
+ * (e.g., maxConcurrent for weaker hardware) without dirtying the worktree.
+ *
+ * Merge order: DEFAULT_CONFIG <- config.yaml <- config.local.yaml
+ */
+async function mergeLocalConfig(
+	resolvedRoot: string,
+	config: OverstoryConfig,
+): Promise<OverstoryConfig> {
+	const localPath = join(resolvedRoot, OVERSTORY_DIR, CONFIG_LOCAL_FILENAME);
+	const localFile = Bun.file(localPath);
+
+	if (!(await localFile.exists())) {
+		return config;
+	}
+
+	let text: string;
+	try {
+		text = await localFile.text();
+	} catch (err) {
+		throw new ConfigError(`Failed to read local config file: ${localPath}`, {
+			configPath: localPath,
+			cause: err instanceof Error ? err : undefined,
+		});
+	}
+
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = parseYaml(text);
+	} catch (err) {
+		throw new ConfigError(`Failed to parse YAML in local config file: ${localPath}`, {
+			configPath: localPath,
+			cause: err instanceof Error ? err : undefined,
+		});
+	}
+
+	migrateDeprecatedWatchdogKeys(parsed);
+
+	return deepMerge(
+		config as unknown as Record<string, unknown>,
+		parsed,
+	) as unknown as OverstoryConfig;
+}
+
+/**
  * Resolve the actual project root, handling git worktrees.
  *
  * When running from inside a git worktree (e.g., an agent's worktree at
@@ -507,9 +555,12 @@ export async function loadConfig(projectRoot: string): Promise<OverstoryConfig> 
 	const exists = await file.exists();
 
 	if (!exists) {
-		// No config file — use defaults (project.root is set, so validation passes)
-		validateConfig(defaults);
-		return defaults;
+		// No config file — use defaults, but still check for local overrides
+		let config = defaults;
+		config = await mergeLocalConfig(resolvedRoot, config);
+		config.project.root = resolvedRoot;
+		validateConfig(config);
+		return config;
 	}
 
 	let text: string;
@@ -538,10 +589,13 @@ export async function loadConfig(projectRoot: string): Promise<OverstoryConfig> 
 	migrateDeprecatedWatchdogKeys(parsed);
 
 	// Deep merge parsed config over defaults
-	const merged = deepMerge(
+	let merged = deepMerge(
 		defaults as unknown as Record<string, unknown>,
 		parsed,
 	) as unknown as OverstoryConfig;
+
+	// Check for config.local.yaml (local overrides, gitignored)
+	merged = await mergeLocalConfig(resolvedRoot, merged);
 
 	// Ensure project.root is always set to the resolved project root
 	merged.project.root = resolvedRoot;

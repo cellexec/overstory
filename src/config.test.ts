@@ -151,6 +151,73 @@ agents:
 		expect(config.agents.maxConcurrent).toBe(3);
 	});
 
+	test("config.local.yaml overrides values from config.yaml", async () => {
+		await ensureOverstoryDir();
+		await writeConfig(`
+project:
+  canonicalBranch: develop
+agents:
+  maxConcurrent: 10
+`);
+		await Bun.write(
+			join(tempDir, ".overstory", "config.local.yaml"),
+			`agents:\n  maxConcurrent: 4\n`,
+		);
+
+		const config = await loadConfig(tempDir);
+		// Local override wins
+		expect(config.agents.maxConcurrent).toBe(4);
+		// Non-overridden value from config.yaml preserved
+		expect(config.project.canonicalBranch).toBe("develop");
+	});
+
+	test("config.local.yaml works when config.yaml does not exist", async () => {
+		await ensureOverstoryDir();
+		// No config.yaml, only config.local.yaml
+		await Bun.write(
+			join(tempDir, ".overstory", "config.local.yaml"),
+			`agents:\n  maxConcurrent: 3\n`,
+		);
+
+		const config = await loadConfig(tempDir);
+		expect(config.agents.maxConcurrent).toBe(3);
+		// Defaults still applied
+		expect(config.project.canonicalBranch).toBe("main");
+	});
+
+	test("values from config.local.yaml are validated", async () => {
+		await ensureOverstoryDir();
+		await writeConfig(`
+project:
+  canonicalBranch: main
+`);
+		await Bun.write(
+			join(tempDir, ".overstory", "config.local.yaml"),
+			`agents:\n  maxConcurrent: -1\n`,
+		);
+
+		await expect(loadConfig(tempDir)).rejects.toThrow(ValidationError);
+	});
+
+	test("config.local.yaml deep merges nested objects", async () => {
+		await ensureOverstoryDir();
+		await writeConfig(`
+watchdog:
+  tier0Enabled: false
+  staleThresholdMs: 120000
+`);
+		await Bun.write(
+			join(tempDir, ".overstory", "config.local.yaml"),
+			`watchdog:\n  tier0Enabled: true\n`,
+		);
+
+		const config = await loadConfig(tempDir);
+		// Local override
+		expect(config.watchdog.tier0Enabled).toBe(true);
+		// Non-overridden value from config.yaml preserved
+		expect(config.watchdog.staleThresholdMs).toBe(120000);
+	});
+
 	test("migrates deprecated watchdog tier1/tier2 keys to tier0/tier1", async () => {
 		await ensureOverstoryDir();
 		await writeConfig(`
